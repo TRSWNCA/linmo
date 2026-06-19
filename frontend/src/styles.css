@@ -15,6 +15,7 @@ body {
   color: #242424;
   background: transparent;
   -webkit-font-smoothing: antialiased;
+  overflow: hidden;
 }
 
 button,
@@ -103,9 +104,11 @@ textarea {
 .appShell {
   display: grid;
   grid-template-columns: 232px minmax(0, 1fr);
-  min-height: 100vh;
+  height: 100vh;
+  min-height: 0;
   background: #f5f5f5;
   padding-top: 36px;
+  overflow: hidden;
 }
 
 .navRail {
@@ -162,8 +165,11 @@ textarea {
 
 .workspace {
   min-width: 0;
+  min-height: 0;
+  height: calc(100vh - 36px);
   padding: 28px;
   background: #f9f9f9;
+  overflow: hidden;
 }
 
 .mutedText {
@@ -217,7 +223,8 @@ textarea {
 }
 
 .homeView {
-  min-height: calc(100vh - 56px);
+  height: 100%;
+  min-height: 0;
   display: grid;
   place-content: center;
   justify-items: center;
@@ -265,6 +272,14 @@ textarea {
   grid-template-columns: repeat(auto-fill, minmax(172px, 1fr));
   gap: 22px 18px;
   align-items: start;
+}
+
+.libraryView,
+.pagePreviewView {
+  height: 100%;
+  min-height: 0;
+  overflow-y: auto;
+  padding-right: 4px;
 }
 
 .coverTile {
@@ -356,6 +371,7 @@ textarea {
 
 .pagePreviewView {
   display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
   gap: 18px;
 }
 
@@ -431,8 +447,8 @@ textarea {
   display: grid;
   grid-template-rows: auto minmax(0, 1fr) auto;
   gap: 14px;
-  height: calc(100vh - 56px);
-  min-height: 680px;
+  height: 100%;
+  min-height: 0;
 }
 
 .makeTopbar {
