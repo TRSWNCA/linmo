@@ -30,11 +30,14 @@ import {
 import {
   Add24Regular,
   ArrowLeft24Regular,
+  ArrowSync24Regular,
   BookOpen24Regular,
   Box24Regular,
   Color24Regular,
   Dismiss24Regular,
+  DocumentFolder24Regular,
   DocumentPdf24Regular,
+  FolderSync24Regular,
   Home24Regular,
   Image24Regular,
   LineHorizontal1Regular,
@@ -43,9 +46,9 @@ import {
   Settings24Regular,
 } from "@fluentui/react-icons";
 import packageJson from "../package.json";
-import type { Api, Copybook, Page, Preset, QueueItem } from "./types";
+import type { Api, Copybook, GeneratedPost, GeneratedPostFile, Page, Preset, QueueItem } from "./types";
 
-type View = "home" | "library" | "make" | "presets" | "settings";
+type View = "home" | "library" | "make" | "practice" | "presets" | "settings";
 
 const APP_VERSION = `v${packageJson.version}`;
 
@@ -86,8 +89,51 @@ const fallbackApi: Api = {
   async render_queue_preview() {
     return "";
   },
-  async export_queue_to_pdf(queue_item_ids) {
-    return { output_path: "", page_count: queue_item_ids.length };
+  async export_queue_to_pdf(queue_item_ids, _presetId, _outputPath, name) {
+    return {
+      output_path: "",
+      page_count: queue_item_ids.length,
+      generated_post: name ? {
+        id: Date.now(),
+        name,
+        original_pdf_path: "",
+        thumb_path: "",
+        page_count: queue_item_ids.length,
+        result_count: 0,
+        sync_status: "local",
+        remote_path: "",
+        last_synced_at: 0,
+        created_at: Date.now(),
+        updated_at: Date.now(),
+      } : undefined,
+    };
+  },
+  async get_next_generated_post_name() {
+    return "卷一";
+  },
+  async list_generated_posts() {
+    return [];
+  },
+  async get_generated_post_thumbnail() {
+    return "";
+  },
+  async list_generated_post_files() {
+    return [];
+  },
+  async sync_generated_post(post_id) {
+    return {
+      id: post_id,
+      name: "",
+      original_pdf_path: "",
+      thumb_path: "",
+      page_count: 0,
+      result_count: 0,
+      sync_status: "synced",
+      remote_path: "",
+      last_synced_at: Date.now(),
+      created_at: Date.now(),
+      updated_at: Date.now(),
+    };
   },
   async list_presets() {
     return [];
@@ -159,6 +205,7 @@ export function App() {
           <NavButton icon={<Home24Regular />} active={view === "home"} onClick={() => setView("home")}>首页</NavButton>
           <NavButton icon={<BookOpen24Regular />} active={view === "library"} onClick={() => setView("library")}>藏帖阁</NavButton>
           <NavButton icon={<DocumentPdf24Regular />} active={view === "make"} onClick={() => setView("make")}>生成帖</NavButton>
+          <NavButton icon={<DocumentFolder24Regular />} active={view === "practice"} onClick={() => setView("practice")}>练帖阁</NavButton>
           <NavButton icon={<Color24Regular />} active={view === "presets"} onClick={() => setView("presets")}>预设</NavButton>
           <div className="navSpacer" />
           <NavButton icon={<Settings24Regular />} active={view === "settings"} onClick={() => setView("settings")}>设置</NavButton>
@@ -166,7 +213,8 @@ export function App() {
         <main className="workspace">
           {view === "home" && <Home stats={stats} />}
           {view === "library" && <Library setMessage={setMessage} refreshStats={refreshStats} />}
-          {view === "make" && <Maker setMessage={setMessage} refreshStats={refreshStats} />}
+          {view === "make" && <Maker setMessage={setMessage} refreshStats={refreshStats} openPractice={() => setView("practice")} />}
+          {view === "practice" && <PracticeShelf setMessage={setMessage} />}
           {view === "presets" && <Presets setMessage={setMessage} />}
           {view === "settings" && <Settings setMessage={setMessage} />}
         </main>
@@ -588,7 +636,15 @@ function MetadataDialog({
   );
 }
 
-function Maker({ setMessage, refreshStats }: { setMessage: (value: string) => void; refreshStats: () => Promise<void> }) {
+function Maker({
+  setMessage,
+  refreshStats,
+  openPractice,
+}: {
+  setMessage: (value: string) => void;
+  refreshStats: () => Promise<void>;
+  openPractice: () => void;
+}) {
   const [items, setItems] = useState<QueueItem[]>([]);
   const [activeId, setActiveId] = useState<number | null>(null);
   const [preview, setPreview] = useState("");
@@ -596,6 +652,9 @@ function Maker({ setMessage, refreshStats }: { setMessage: (value: string) => vo
   const [queueThumbs, setQueueThumbs] = useState<Record<number, string>>({});
   const [comparePreview, setComparePreview] = useState(true);
   const [previewing, setPreviewing] = useState(false);
+  const [exportDialogOpen, setExportDialogOpen] = useState(false);
+  const [exportName, setExportName] = useState("");
+  const [exporting, setExporting] = useState(false);
   const [draggingId, setDraggingId] = useState<number | null>(null);
   const previewRunId = useRef(0);
   const active = useMemo(() => items.find((item) => item.id === activeId) || null, [items, activeId]);
@@ -628,10 +687,30 @@ function Maker({ setMessage, refreshStats }: { setMessage: (value: string) => vo
     }
   }
 
+  async function openExportDialog() {
+    const defaultName = await api().get_next_generated_post_name();
+    setExportName(defaultName);
+    setExportDialogOpen(true);
+  }
+
   async function exportPdf() {
-    const result = await api().export_queue_to_pdf(items.map((item) => item.id), null, null);
-    await refreshStats();
-    setMessage(`已导出 ${result.page_count} 页：${result.output_path}`);
+    const name = exportName.trim();
+    if (!name) {
+      setMessage("名称不能为空");
+      return;
+    }
+    setExporting(true);
+    try {
+      const result = await api().export_queue_to_pdf(items.map((item) => item.id), null, null, name);
+      await refreshStats();
+      setExportDialogOpen(false);
+      setMessage(`已保存 ${result.page_count} 页到练帖阁：${name}`);
+      openPractice();
+    } catch (error) {
+      setMessage(String(error));
+    } finally {
+      setExporting(false);
+    }
   }
 
   function moveQueueItem(targetId: number) {
@@ -704,7 +783,7 @@ function Maker({ setMessage, refreshStats }: { setMessage: (value: string) => vo
       <div className="makeTopbar">
         {active ? <ParamToolbar item={active} update={updateActive} /> : <div className="paramToolbarPlaceholder" />}
         <Checkbox checked={comparePreview} onChange={(_, data) => setComparePreview(Boolean(data.checked))} label="对照预览" />
-        <Button appearance="primary" icon={<DocumentPdf24Regular />} disabled={!items.length} onClick={exportPdf}>导出 PDF</Button>
+        <Button appearance="primary" icon={<DocumentPdf24Regular />} disabled={!items.length} onClick={openExportDialog}>导出 PDF</Button>
       </div>
 
       <div className={comparePreview ? "makeStage compare" : "makeStage single"}>
@@ -752,7 +831,53 @@ function Maker({ setMessage, refreshStats }: { setMessage: (value: string) => vo
           </button>
         ))}
       </div>
+      <ExportPostDialog
+        open={exportDialogOpen}
+        name={exportName}
+        saving={exporting}
+        onNameChange={setExportName}
+        onCancel={() => setExportDialogOpen(false)}
+        onSave={exportPdf}
+      />
     </section>
+  );
+}
+
+function ExportPostDialog({
+  open,
+  name,
+  saving,
+  onNameChange,
+  onCancel,
+  onSave,
+}: {
+  open: boolean;
+  name: string;
+  saving: boolean;
+  onNameChange: (value: string) => void;
+  onCancel: () => void;
+  onSave: () => Promise<void>;
+}) {
+  if (!open) return null;
+  return (
+    <Dialog open>
+      <DialogSurface>
+        <DialogBody>
+          <DialogTitle>保存生成帖</DialogTitle>
+          <DialogContent>
+            <Field label="名称">
+              <Input value={name} onChange={(_, data) => onNameChange(data.value)} autoFocus />
+            </Field>
+          </DialogContent>
+          <DialogActions>
+            <Button appearance="secondary" disabled={saving} onClick={onCancel}>取消</Button>
+            <Button appearance="primary" icon={<Save24Regular />} disabled={saving || !name.trim()} onClick={onSave}>
+              保存
+            </Button>
+          </DialogActions>
+        </DialogBody>
+      </DialogSurface>
+    </Dialog>
   );
 }
 
@@ -859,6 +984,153 @@ function ParamToolbar({ item, update }: { item: QueueItem; update: (params: Reco
   );
 }
 
+function PracticeShelf({ setMessage }: { setMessage: (value: string) => void }) {
+  const [posts, setPosts] = useState<GeneratedPost[]>([]);
+  const [selected, setSelected] = useState<GeneratedPost | null>(null);
+  const [previewing, setPreviewing] = useState(false);
+  const [thumbs, setThumbs] = useState<Record<number, string>>({});
+  const [files, setFiles] = useState<GeneratedPostFile[]>([]);
+  const [syncingId, setSyncingId] = useState<number | null>(null);
+
+  async function loadPosts() {
+    const loaded = await api().list_generated_posts();
+    setPosts(loaded);
+    const queue = [...loaded];
+    const workers = Array.from({ length: Math.min(6, queue.length) }, async () => {
+      while (queue.length) {
+        const post = queue.shift();
+        if (!post) return;
+        try {
+          const thumbnail = await api().get_generated_post_thumbnail(post.id);
+          setThumbs((current) => ({ ...current, [post.id]: thumbnail }));
+        } catch (error) {
+          setMessage(String(error));
+        }
+      }
+    });
+    void Promise.all(workers);
+  }
+
+  async function openPost(post: GeneratedPost) {
+    setSelected(post);
+    setPreviewing(true);
+    setFiles(await api().list_generated_post_files(post.id));
+  }
+
+  async function syncPost(post: GeneratedPost) {
+    setSyncingId(post.id);
+    try {
+      const updated = await api().sync_generated_post(post.id);
+      setPosts((current) => current.map((item) => item.id === updated.id ? updated : item));
+      setSelected((current) => current?.id === updated.id ? updated : current);
+      const thumbnail = await api().get_generated_post_thumbnail(updated.id);
+      setThumbs((current) => ({ ...current, [updated.id]: thumbnail }));
+      if (selected?.id === updated.id) {
+        setFiles(await api().list_generated_post_files(updated.id));
+      }
+      setMessage(`已同步：${updated.name}`);
+    } catch (error) {
+      setMessage(String(error));
+      await loadPosts();
+    } finally {
+      setSyncingId(null);
+    }
+  }
+
+  useEffect(() => {
+    loadPosts().catch((error) => setMessage(String(error)));
+  }, []);
+
+  if (previewing && selected) {
+    return (
+      <section className="pagePreviewView">
+        <div className="previewTopbar">
+          <Button icon={<ArrowLeft24Regular />} appearance="subtle" onClick={() => setPreviewing(false)}>返回</Button>
+          <div className="previewTitle">
+            <Title2>{selected.name}</Title2>
+            <Text className="mutedText">{selected.page_count} 页 · 结果 {selected.result_count} 份</Text>
+          </div>
+          <Button appearance="primary" icon={<ArrowSync24Regular />} disabled={syncingId === selected.id} onClick={() => syncPost(selected)}>
+            同步
+          </Button>
+        </div>
+        <Card className="contentCard">
+          <div className="generatedFileList">
+            {files.map((file) => (
+              <div className="generatedFileRow" key={`${file.kind}-${file.path}`}>
+                <DocumentPdf24Regular />
+                <div>
+                  <Text weight="semibold">{file.kind === "original" ? "原帖" : "练习结果"} · {file.name}</Text>
+                  <Text size={200} className="mutedText" truncate>{file.path}</Text>
+                </div>
+                <Text size={200} className="mutedText">{formatFileSize(file.size)}</Text>
+              </div>
+            ))}
+            {!files.length && <div className="centerState"><Text>还没有可显示的 PDF</Text></div>}
+          </div>
+        </Card>
+      </section>
+    );
+  }
+
+  return (
+    <section className="libraryView">
+      <div className="sectionHeader">
+        <div>
+          <Title1>练帖阁</Title1>
+          <Text className="mutedText">保存生成帖，并通过 WebDAV 同步原帖和练习结果</Text>
+        </div>
+      </div>
+      <div className="copybookShelf">
+        {posts.map((post) => (
+          <div
+            key={post.id}
+            className={selected?.id === post.id ? "coverTile selected" : "coverTile"}
+            onClick={() => setSelected(post)}
+            onDoubleClick={() => openPost(post)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter") openPost(post);
+            }}
+            role="button"
+            tabIndex={0}
+          >
+            <div className="coverFrame generatedCoverFrame">
+              {thumbs[post.id] ? <img src={thumbs[post.id]} alt={post.name} /> : <Spinner size="small" />}
+              <Tooltip content={syncingId === post.id ? "正在同步" : "同步"} relationship="label">
+                <Button
+                  appearance="primary"
+                  icon={<FolderSync24Regular />}
+                  className="generatedSyncButton"
+                  disabled={syncingId === post.id}
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    syncPost(post).catch((error) => setMessage(String(error)));
+                  }}
+                />
+              </Tooltip>
+            </div>
+            <Text weight="semibold" truncate>{post.name}</Text>
+            <Text size={200} className="mutedText" truncate>{post.page_count} 页 · 结果 {post.result_count} 份 · {syncStatusText(post.sync_status)}</Text>
+          </div>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function syncStatusText(status: string) {
+  if (status === "synced") return "已同步";
+  if (status === "syncing") return "同步中";
+  if (status === "error") return "同步失败";
+  return "本地";
+}
+
+function formatFileSize(size: number) {
+  if (size < 1024) return `${size} B`;
+  if (size < 1024 * 1024) return `${Math.round(size / 1024)} KB`;
+  return `${(size / 1024 / 1024).toFixed(1)} MB`;
+}
+
 function Presets({ setMessage }: { setMessage: (value: string) => void }) {
   const [presets, setPresets] = useState<Preset[]>([]);
   const [form, setForm] = useState({ name: "", background_image: "", ink_color: "#000000", foreground_threshold: 18, mode: "row", column_detection: "gray" });
@@ -955,6 +1227,10 @@ function Settings({ setMessage }: { setMessage: (value: string) => void }) {
           <Field label="数据目录"><Input value={settings.data_dir || ""} onChange={(_, data) => setSettings({ ...settings, data_dir: data.value })} /></Field>
           <Field label="默认 DPI"><Input value={settings.default_dpi || "300"} onChange={(_, data) => setSettings({ ...settings, default_dpi: data.value })} /></Field>
           <Field label="默认导出目录"><Input value={settings.default_export_dir || ""} onChange={(_, data) => setSettings({ ...settings, default_export_dir: data.value })} /></Field>
+          <Field label="WebDAV 地址"><Input value={settings.webdav_url || ""} onChange={(_, data) => setSettings({ ...settings, webdav_url: data.value })} /></Field>
+          <Field label="WebDAV 用户名"><Input value={settings.webdav_username || ""} onChange={(_, data) => setSettings({ ...settings, webdav_username: data.value })} /></Field>
+          <Field label="WebDAV 应用密码"><Input type="password" value={settings.webdav_password || ""} onChange={(_, data) => setSettings({ ...settings, webdav_password: data.value })} /></Field>
+          <Field label="WebDAV 远端根目录"><Input value={settings.webdav_remote_root || "Linmo"} onChange={(_, data) => setSettings({ ...settings, webdav_remote_root: data.value })} /></Field>
         </div>
       </Card>
     </section>

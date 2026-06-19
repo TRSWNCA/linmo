@@ -63,6 +63,20 @@ CREATE TABLE IF NOT EXISTS exports (
     created_at INTEGER NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS generated_posts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    original_pdf_path TEXT NOT NULL DEFAULT '',
+    thumb_path TEXT NOT NULL DEFAULT '',
+    page_count INTEGER NOT NULL DEFAULT 0,
+    result_count INTEGER NOT NULL DEFAULT 0,
+    sync_status TEXT NOT NULL DEFAULT 'local',
+    remote_path TEXT NOT NULL DEFAULT '',
+    last_synced_at INTEGER NOT NULL DEFAULT 0,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS settings (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
@@ -91,6 +105,11 @@ class Repository:
         with self.connect() as conn:
             conn.executescript(SCHEMA)
             _ensure_column(conn, "copybooks", "cover_path", "TEXT NOT NULL DEFAULT ''")
+            _ensure_column(conn, "generated_posts", "thumb_path", "TEXT NOT NULL DEFAULT ''")
+            _ensure_column(conn, "generated_posts", "result_count", "INTEGER NOT NULL DEFAULT 0")
+            _ensure_column(conn, "generated_posts", "sync_status", "TEXT NOT NULL DEFAULT 'local'")
+            _ensure_column(conn, "generated_posts", "remote_path", "TEXT NOT NULL DEFAULT ''")
+            _ensure_column(conn, "generated_posts", "last_synced_at", "INTEGER NOT NULL DEFAULT 0")
 
     def stats(self) -> dict[str, int]:
         with self.connect() as conn:
@@ -364,6 +383,62 @@ class Repository:
                 "INSERT INTO exports (output_path, page_count, created_at) VALUES (?, ?, ?)",
                 (str(output_path), page_count, _now()),
             )
+
+    def count_generated_posts(self) -> int:
+        with self.connect() as conn:
+            value = conn.execute("SELECT COUNT(*) FROM generated_posts").fetchone()[0]
+        return int(value)
+
+    def create_generated_post(self, name: str, page_count: int) -> dict[str, Any]:
+        now = _now()
+        with self.connect() as conn:
+            cur = conn.execute(
+                """
+                INSERT INTO generated_posts
+                    (name, page_count, created_at, updated_at)
+                VALUES (?, ?, ?, ?)
+                """,
+                (name, int(page_count), now, now),
+            )
+            post_id = int(cur.lastrowid)
+        return self.get_generated_post(post_id)
+
+    def update_generated_post(self, post_id: int, data: dict[str, Any]) -> dict[str, Any]:
+        allowed = [
+            "name",
+            "original_pdf_path",
+            "thumb_path",
+            "page_count",
+            "result_count",
+            "sync_status",
+            "remote_path",
+            "last_synced_at",
+        ]
+        values = {key: data[key] for key in allowed if key in data}
+        if not values:
+            return self.get_generated_post(post_id)
+        values["updated_at"] = _now()
+        assignments = ", ".join(f"{key} = ?" for key in values)
+        with self.connect() as conn:
+            conn.execute(
+                f"UPDATE generated_posts SET {assignments} WHERE id = ?",
+                [*values.values(), post_id],
+            )
+        return self.get_generated_post(post_id)
+
+    def list_generated_posts(self) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM generated_posts ORDER BY updated_at DESC, id DESC"
+            ).fetchall()
+        return [_row_to_dict(row) for row in rows]
+
+    def get_generated_post(self, post_id: int) -> dict[str, Any]:
+        with self.connect() as conn:
+            row = conn.execute("SELECT * FROM generated_posts WHERE id = ?", (post_id,)).fetchone()
+        if row is None:
+            raise ValueError(f"generated post not found: {post_id}")
+        return _row_to_dict(row)
 
     def get_settings(self) -> dict[str, str]:
         with self.connect() as conn:

@@ -88,9 +88,29 @@ class LinmoApi:
         queue_item_ids: list[int],
         preset_id: int | None = None,
         output_path: str | None = None,
+        name: str | None = None,
     ) -> dict[str, Any]:
+        if name is not None:
+            post = self.services.export_queue_to_generated_post(queue_item_ids, name, preset_id)
+            return {"output_path": post["original_pdf_path"], "page_count": len(queue_item_ids), "generated_post": post}
         path = self.services.export_queue_to_pdf(queue_item_ids, preset_id, output_path)
         return {"output_path": str(path), "page_count": len(queue_item_ids)}
+
+    def get_next_generated_post_name(self) -> str:
+        return self.services.next_generated_post_name()
+
+    def list_generated_posts(self) -> list[dict[str, Any]]:
+        return self.services.list_generated_posts()
+
+    def get_generated_post_thumbnail(self, post_id: int) -> str:
+        path = self.services.generated_post_thumbnail(int(post_id))
+        return file_to_data_url(path) if path else ""
+
+    def list_generated_post_files(self, post_id: int) -> list[dict[str, Any]]:
+        return self.services.list_generated_post_files(int(post_id))
+
+    def sync_generated_post(self, post_id: int) -> dict[str, Any]:
+        return self.services.sync_generated_post(int(post_id))
 
     def list_presets(self) -> list[dict[str, Any]]:
         return self.services.repo.list_presets()
