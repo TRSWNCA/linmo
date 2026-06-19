@@ -221,6 +221,10 @@ class Repository:
         return _row_to_dict(row)
 
     def add_queue_item(self, page_id: int, params: dict[str, Any]) -> dict[str, Any]:
+        existing = self.get_queue_item_by_page_id(page_id)
+        if existing is not None:
+            return existing
+
         with self.connect() as conn:
             cur = conn.execute(
                 "INSERT INTO queue_items (page_id, params_json, created_at) VALUES (?, ?, ?)",
@@ -228,6 +232,22 @@ class Repository:
             )
             queue_id = int(cur.lastrowid)
         return self.get_queue_item(queue_id)
+
+    def get_queue_item_by_page_id(self, page_id: int) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            row = conn.execute(
+                """
+                SELECT q.*, p.page_no, p.copybook_id, c.title AS copybook_title
+                FROM queue_items q
+                JOIN pages p ON p.id = q.page_id
+                JOIN copybooks c ON c.id = p.copybook_id
+                WHERE q.page_id = ?
+                ORDER BY q.created_at, q.id
+                LIMIT 1
+                """,
+                (page_id,),
+            ).fetchone()
+        return _decode_params(_row_to_dict(row)) if row is not None else None
 
     def list_queue_items(self) -> list[dict[str, Any]]:
         with self.connect() as conn:

@@ -51,11 +51,16 @@ class LinmoApi:
 
     def add_pages_to_queue(self, page_ids: list[int]) -> list[dict[str, Any]]:
         items = []
+        queued_page_ids = set()
         for page_id in page_ids:
+            page_id = int(page_id)
+            if page_id in queued_page_ids:
+                continue
+            queued_page_ids.add(page_id)
             items.append(
                 self.services.repo.add_queue_item(
-                    int(page_id),
-                    self.services.default_params_for_page(int(page_id)),
+                    page_id,
+                    self.services.default_params_for_page(page_id),
                 )
             )
         return items

@@ -187,6 +187,10 @@ function NavButton({ active, icon, children, onClick }: { active: boolean; icon:
   );
 }
 
+function pageThumbClass(selected: boolean, queued: boolean) {
+  return ["pageThumb", selected ? "selected" : "", queued ? "queued" : ""].filter(Boolean).join(" ");
+}
+
 function TitleBar() {
   return (
     <header className="titleBar" onDoubleClick={() => api().window_toggle_maximize()}>
@@ -245,9 +249,20 @@ function Library({ setMessage, refreshStats }: { setMessage: (value: string) => 
   const [covers, setCovers] = useState<Record<number, string>>({});
   const [thumbs, setThumbs] = useState<Record<number, string>>({});
   const [selectedPages, setSelectedPages] = useState<number[]>([]);
+  const [queueItems, setQueueItems] = useState<QueueItem[]>([]);
   const [loadingPages, setLoadingPages] = useState(false);
   const [importing, setImporting] = useState(false);
   const openRunId = useRef(0);
+  const queueIndexByPageId = useMemo(() => {
+    const indexByPageId: Record<number, number> = {};
+    queueItems.forEach((item, index) => {
+      if (indexByPageId[item.page_id] === undefined) {
+        indexByPageId[item.page_id] = index + 1;
+      }
+    });
+    return indexByPageId;
+  }, [queueItems]);
+  const selectedNewPageCount = selectedPages.filter((pageId) => queueIndexByPageId[pageId] === undefined).length;
 
   async function loadCopybooks() {
     const loaded = await api().list_copybooks();
@@ -282,6 +297,7 @@ function Library({ setMessage, refreshStats }: { setMessage: (value: string) => 
       if (openRunId.current !== runId) return;
       setPages(loadedPages);
       setLoadingPages(false);
+      await refreshQueueItems();
 
       const queue = [...loadedPages];
       const workers = Array.from({ length: Math.min(6, queue.length) }, async () => {
@@ -336,13 +352,32 @@ function Library({ setMessage, refreshStats }: { setMessage: (value: string) => 
   }
 
   async function addToQueue() {
-    if (!selectedPages.length) return;
-    await api().add_pages_to_queue(selectedPages);
-    setMessage(`已加入 ${selectedPages.length} 页到制作队列`);
+    const pageIds = selectedPages.filter((pageId) => queueIndexByPageId[pageId] === undefined);
+    if (!pageIds.length) {
+      setSelectedPages([]);
+      setMessage("选中的页面已在制作队列中");
+      return;
+    }
+
+    const previousPageIds = new Set(queueItems.map((item) => item.page_id));
+    await api().add_pages_to_queue(pageIds);
+    const updatedItems = await refreshQueueItems();
+    const addedCount = updatedItems.filter((item) => pageIds.includes(item.page_id) && !previousPageIds.has(item.page_id)).length;
+    setSelectedPages((current) => current.filter((pageId) => queueIndexByPageId[pageId] === undefined && !pageIds.includes(pageId)));
+    setMessage(addedCount ? `已加入 ${addedCount} 页到制作队列` : "选中的页面已在制作队列中");
   }
 
   function togglePage(pageId: number) {
+    if (queueIndexByPageId[pageId] !== undefined) return;
     setSelectedPages((current) => current.includes(pageId) ? current.filter((id) => id !== pageId) : [...current, pageId]);
+  }
+
+  async function refreshQueueItems() {
+    const loadedItems = await api().list_queue_items();
+    const queuedPageIds = new Set(loadedItems.map((item) => item.page_id));
+    setQueueItems(loadedItems);
+    setSelectedPages((current) => current.filter((pageId) => !queuedPageIds.has(pageId)));
+    return loadedItems;
   }
 
   useEffect(() => {
@@ -358,7 +393,7 @@ function Library({ setMessage, refreshStats }: { setMessage: (value: string) => 
             <Title2>{selected.title}</Title2>
             <Text className="mutedText">{selected.author || "未填写作者"} · {pages.length || selected.page_count || 0} 页</Text>
           </div>
-          <Button appearance="primary" icon={<Add24Regular />} disabled={!selectedPages.length} onClick={addToQueue}>
+          <Button appearance="primary" icon={<Add24Regular />} disabled={!selectedNewPageCount} onClick={addToQueue}>
             加入制作队列
           </Button>
         </div>
@@ -366,19 +401,27 @@ function Library({ setMessage, refreshStats }: { setMessage: (value: string) => 
           <div className="centerState"><Spinner label="正在读取页面" /></div>
         ) : (
           <div className="pageGrid">
-            {pages.map((page) => (
-              <button
-                key={page.id}
-                className={selectedPages.includes(page.id) ? "pageThumb selected" : "pageThumb"}
-                onClick={() => togglePage(page.id)}
-                type="button"
-              >
-                <div className="thumbCanvas">
-                  {thumbs[page.id] ? <img src={thumbs[page.id]} alt={`第 ${page.page_no} 页`} /> : <Spinner size="small" />}
-                </div>
-                <Text size={200}>第 {page.page_no} 页</Text>
-              </button>
-            ))}
+            {pages.map((page) => {
+              const queueIndex = queueIndexByPageId[page.id];
+              const isQueued = queueIndex !== undefined;
+              const isSelected = selectedPages.includes(page.id);
+              return (
+                <button
+                  key={page.id}
+                  className={pageThumbClass(isSelected, isQueued)}
+                  onClick={() => togglePage(page.id)}
+                  type="button"
+                  aria-pressed={isSelected || isQueued}
+                >
+                  <div className="thumbCanvas">
+                    {thumbs[page.id] ? <img src={thumbs[page.id]} alt={`第 ${page.page_no} 页`} /> : <Spinner size="small" />}
+                    {isQueued && <span className="pageQueueBadge">{queueIndex}</span>}
+                    {!isQueued && isSelected && <span className="pageSelectBadge">待加</span>}
+                  </div>
+                  <Text size={200}>第 {page.page_no} 页</Text>
+                </button>
+              );
+            })}
           </div>
         )}
       </section>

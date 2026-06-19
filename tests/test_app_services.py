@@ -62,6 +62,25 @@ class AppServicesTests(unittest.TestCase):
             api = LinmoApi(paths)
             self.assertEqual(api.list_queue_items(), [])
 
+    def test_api_add_pages_to_queue_does_not_duplicate_pages(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "sample.png"
+            _make_ruled_image(source)
+            api = LinmoApi(AppPaths(root / "data"))
+
+            imported = api.import_copybooks([str(source)])
+            page = api.list_pages(imported[0]["id"])[0]
+
+            first_items = api.add_pages_to_queue([page["id"], page["id"]])
+            second_items = api.add_pages_to_queue([page["id"]])
+            queue_items = api.list_queue_items()
+
+            self.assertEqual(len(first_items), 1)
+            self.assertEqual(first_items[0]["id"], second_items[0]["id"])
+            self.assertEqual(len(queue_items), 1)
+            self.assertEqual(queue_items[0]["page_id"], page["id"])
+
     def test_api_import_pdf_and_preset_crud(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
