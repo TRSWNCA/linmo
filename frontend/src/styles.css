@@ -11,9 +11,10 @@ body,
 
 body {
   margin: 0;
-  font-family: "Segoe UI", Inter, "Noto Sans SC", "Microsoft YaHei", sans-serif;
+  font-family: "Segoe UI Variable", "Segoe UI", "Segoe Fluent Icons", Inter, "Noto Sans SC", "Microsoft YaHei", sans-serif;
   color: #242424;
-  background: #f5f5f5;
+  background: transparent;
+  -webkit-font-smoothing: antialiased;
 }
 
 button,
@@ -23,24 +24,94 @@ textarea {
   font: inherit;
 }
 
+/* ── Fluent title bar (frameless window chrome) ── */
+.titleBar {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: 36px;
+  padding: 0 4px 0 12px;
+  background: rgba(243, 243, 243, 0.82);
+  backdrop-filter: blur(24px) saturate(125%);
+  -webkit-app-region: drag;
+  user-select: none;
+  border-bottom: 1px solid rgba(0, 0, 0, 0.06);
+}
+
+.titleBarDrag {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.titleBarIcon {
+  width: 18px;
+  height: 18px;
+  border-radius: 4px;
+  flex-shrink: 0;
+}
+
+.titleBarLabel {
+  font-size: 12px;
+  font-weight: 600;
+  color: #1a1a1a;
+  letter-spacing: 0.02em;
+}
+
+.titleBarControls {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  -webkit-app-region: no-drag;
+}
+
+.titleBarBtn {
+  width: 40px !important;
+  min-width: unset !important;
+  height: 28px !important;
+  border-radius: 4px !important;
+  padding: 0 !important;
+  display: flex !important;
+  align-items: center;
+  justify-content: center;
+  background: transparent !important;
+  color: #1a1a1a !important;
+}
+
+.titleBarBtn:hover {
+  background: rgba(0, 0, 0, 0.06) !important;
+}
+
+.titleBarBtnClose:hover {
+  background: #c42b1c !important;
+  color: #ffffff !important;
+}
+
+/* ── App shell (offset for title bar) ── */
 .appShell {
   display: grid;
   grid-template-columns: 232px minmax(0, 1fr);
   min-height: 100vh;
   background: #f5f5f5;
+  padding-top: 36px;
 }
 
 .navRail {
   position: sticky;
-  top: 0;
-  align-self: start;
+  top: 36px;
   display: flex;
   flex-direction: column;
   gap: 6px;
-  height: 100vh;
+  height: calc(100vh - 36px);
   padding: 20px 14px;
-  background: #ffffff;
-  border-right: 1px solid #e0e0e0;
+  background: #fafafa;
+  border-right: 1px solid rgba(0, 0, 0, 0.06);
 }
 
 .brandBlock {
@@ -50,7 +121,7 @@ textarea {
   min-height: 58px;
   margin-bottom: 12px;
   padding: 4px 6px 14px;
-  border-bottom: 1px solid #e5e5e5;
+  border-bottom: 1px solid rgba(0, 0, 0, 0.06);
 }
 
 .brandMark,
@@ -58,7 +129,7 @@ textarea {
   display: block;
   object-fit: cover;
   background: #ffffff;
-  box-shadow: 0 8px 28px rgba(15, 108, 189, 0.2);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08), 0 8px 28px rgba(15, 108, 189, 0.12);
 }
 
 .brandMark {
@@ -70,6 +141,12 @@ textarea {
 .navButton {
   justify-content: flex-start;
   min-height: 38px;
+  border-radius: 6px !important;
+}
+
+.navButton[data-focus-visible] {
+  outline: 2px solid #0f6cbd;
+  outline-offset: -2px;
 }
 
 .navSpacer {
@@ -80,6 +157,7 @@ textarea {
 .workspace {
   min-width: 0;
   padding: 28px;
+  background: #f9f9f9;
 }
 
 .mutedText {

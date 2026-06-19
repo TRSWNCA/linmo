@@ -17,14 +17,16 @@ def main() -> None:
     _ensure_display_available()
     api = LinmoApi()
     frontend = _frontend_entry()
-    webview.create_window(
+    window = webview.create_window(
         "Linmo",
         url=str(frontend),
         js_api=api,
         width=1480,
         height=960,
         min_size=(980, 640),
+        frameless=True,
     )
+    _window_ref = window  # keep alive so GC doesn't kill it
     webview.start(debug=_debug_enabled(), gui=_preferred_gui())
 
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import webview
 from pathlib import Path
 from typing import Any
 
@@ -12,6 +13,16 @@ class LinmoApi:
         self.paths = paths or default_app_paths()
         self.services = LinmoServices(self.paths)
         self.services.repo.clear_queue_items()
+
+    # -- window chrome helpers --
+    def window_minimize(self) -> None:
+        _call_window("minimize")
+
+    def window_toggle_maximize(self) -> None:
+        _call_window("toggle_fullscreen")
+
+    def window_close(self) -> None:
+        _call_window("destroy")
 
     def get_home_stats(self) -> dict[str, int]:
         return self.services.repo.stats()
@@ -96,6 +107,17 @@ class LinmoApi:
     def choose_cover_image(self) -> str:
         files = _open_file_dialog(allow_multiple=False, images_only=True)
         return files[0] if files else ""
+
+
+def _call_window(action: str) -> None:
+    try:
+        import webview
+        window = webview.windows[0] if webview.windows else None
+        if window is None:
+            return
+        getattr(window, action)()
+    except Exception:
+        pass
 
 
 def _open_file_dialog(allow_multiple: bool, images_only: bool = False) -> list[str]:

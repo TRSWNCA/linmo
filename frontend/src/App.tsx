@@ -33,9 +33,12 @@ import {
   BookOpen24Regular,
   Box24Regular,
   Color24Regular,
+  Dismiss24Regular,
   DocumentPdf24Regular,
   Home24Regular,
   Image24Regular,
+  LineHorizontal1Regular,
+  Maximize16Regular,
   Save24Regular,
   Settings24Regular,
 } from "@fluentui/react-icons";
@@ -110,6 +113,9 @@ const fallbackApi: Api = {
   async choose_cover_image() {
     return "";
   },
+  async window_minimize() {},
+  async window_toggle_maximize() {},
+  async window_close() {},
 };
 
 function api(): Api {
@@ -138,6 +144,7 @@ export function App() {
   return (
     <FluentProvider theme={webLightTheme}>
       <div className="appShell">
+        <TitleBar />
         <aside className="navRail">
           <div className="brandBlock">
             <img className="brandMark" src="/icon-256.png" alt="Linmo" />
@@ -177,6 +184,40 @@ function NavButton({ active, icon, children, onClick }: { active: boolean; icon:
     <Button appearance={active ? "primary" : "subtle"} icon={icon} className="navButton" onClick={onClick}>
       {children}
     </Button>
+  );
+}
+
+function TitleBar() {
+  return (
+    <header className="titleBar" onDoubleClick={() => api().window_toggle_maximize()}>
+      <div className="titleBarDrag">
+        <img className="titleBarIcon" src="/icon-256.png" alt="" />
+        <span className="titleBarLabel">Linmo</span>
+      </div>
+      <div className="titleBarControls">
+        <Button
+          appearance="subtle"
+          icon={<LineHorizontal1Regular />}
+          className="titleBarBtn"
+          onClick={() => api().window_minimize()}
+          title="最小化"
+        />
+        <Button
+          appearance="subtle"
+          icon={<Maximize16Regular />}
+          className="titleBarBtn"
+          onClick={() => api().window_toggle_maximize()}
+          title="最大化"
+        />
+        <Button
+          appearance="subtle"
+          icon={<Dismiss24Regular />}
+          className="titleBarBtn titleBarBtnClose"
+          onClick={() => api().window_close()}
+          title="关闭"
+        />
+      </div>
+    </header>
   );
 }
 
