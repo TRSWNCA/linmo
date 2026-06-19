@@ -1,0 +1,25 @@
+[project]
+name = "linmo"
+version = "0.1.0"
+description = "Command-line tool for creating calligraphy practice copybook pages."
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "numpy>=1.26",
+    "pillow>=10.0",
+    "pymupdf>=1.24",
+    "pyside6>=6.7; platform_system == 'Linux'",
+    "qtpy>=2.4; platform_system == 'Linux'",
+    "pywebview>=5.0",
+]
+
+[project.scripts]
+linmo = "linmo.cli:main"
+linmo-app = "linmo_app.launcher:main"
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]

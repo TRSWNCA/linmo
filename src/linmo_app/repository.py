@@ -1,0 +1,382 @@
+from __future__ import annotations
+
+import json
+import sqlite3
+import time
+from contextlib import contextmanager
+from pathlib import Path
+from typing import Any, Iterator
+
+
+SCHEMA = """
+PRAGMA foreign_keys = ON;
+
+CREATE TABLE IF NOT EXISTS copybooks (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    title TEXT NOT NULL,
+    author TEXT NOT NULL DEFAULT '',
+    style TEXT NOT NULL DEFAULT '',
+    source_type TEXT NOT NULL,
+    source_path TEXT NOT NULL,
+    cover_path TEXT NOT NULL DEFAULT '',
+    tags TEXT NOT NULL DEFAULT '',
+    notes TEXT NOT NULL DEFAULT '',
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS pages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    copybook_id INTEGER NOT NULL REFERENCES copybooks(id) ON DELETE CASCADE,
+    page_no INTEGER NOT NULL,
+    source_path TEXT NOT NULL,
+    width INTEGER NOT NULL DEFAULT 0,
+    height INTEGER NOT NULL DEFAULT 0,
+    thumb_path TEXT NOT NULL DEFAULT '',
+    UNIQUE(copybook_id, page_no)
+);
+
+CREATE TABLE IF NOT EXISTS queue_items (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    page_id INTEGER NOT NULL REFERENCES pages(id) ON DELETE CASCADE,
+    params_json TEXT NOT NULL,
+    created_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS presets (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL UNIQUE,
+    background_image TEXT NOT NULL DEFAULT '',
+    ink_color TEXT NOT NULL DEFAULT '#000000',
+    foreground_threshold INTEGER NOT NULL DEFAULT 18,
+    mode TEXT NOT NULL DEFAULT 'row',
+    column_detection TEXT NOT NULL DEFAULT 'gray',
+    params_json TEXT NOT NULL DEFAULT '{}',
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS exports (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    output_path TEXT NOT NULL,
+    page_count INTEGER NOT NULL,
+    created_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS settings (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
+"""
+
+
+class Repository:
+    def __init__(self, db_path: Path):
+        self.db_path = db_path
+        self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        self.init_schema()
+
+    @contextmanager
+    def connect(self) -> Iterator[sqlite3.Connection]:
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA foreign_keys = ON")
+        try:
+            yield conn
+            conn.commit()
+        finally:
+            conn.close()
+
+    def init_schema(self) -> None:
+        with self.connect() as conn:
+            conn.executescript(SCHEMA)
+            _ensure_column(conn, "copybooks", "cover_path", "TEXT NOT NULL DEFAULT ''")
+
+    def stats(self) -> dict[str, int]:
+        with self.connect() as conn:
+            copybooks = conn.execute("SELECT COUNT(*) FROM copybooks").fetchone()[0]
+            exported_pages = conn.execute("SELECT COALESCE(SUM(page_count), 0) FROM exports").fetchone()[0]
+        return {"copybooks": int(copybooks), "exported_pages": int(exported_pages)}
+
+    def create_copybook(self, data: dict[str, Any]) -> dict[str, Any]:
+        now = _now()
+        with self.connect() as conn:
+            cur = conn.execute(
+                """
+                INSERT INTO copybooks
+                    (title, author, style, source_type, source_path, cover_path, tags, notes, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    data["title"],
+                    data.get("author", ""),
+                    data.get("style", ""),
+                    data["source_type"],
+                    data["source_path"],
+                    data.get("cover_path", ""),
+                    data.get("tags", ""),
+                    data.get("notes", ""),
+                    now,
+                    now,
+                ),
+            )
+            copybook_id = int(cur.lastrowid)
+        return self.get_copybook(copybook_id)
+
+    def list_copybooks(self) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT c.*, COUNT(p.id) AS page_count
+                FROM copybooks c
+                LEFT JOIN pages p ON p.copybook_id = c.id
+                GROUP BY c.id
+                ORDER BY c.updated_at DESC, c.id DESC
+                """
+            ).fetchall()
+        return [_row_to_dict(row) for row in rows]
+
+    def get_copybook(self, copybook_id: int) -> dict[str, Any]:
+        with self.connect() as conn:
+            row = conn.execute(
+                """
+                SELECT c.*, COUNT(p.id) AS page_count
+                FROM copybooks c
+                LEFT JOIN pages p ON p.copybook_id = c.id
+                WHERE c.id = ?
+                GROUP BY c.id
+                """,
+                (copybook_id,),
+            ).fetchone()
+        if row is None:
+            raise ValueError(f"copybook not found: {copybook_id}")
+        return _row_to_dict(row)
+
+    def update_copybook(self, copybook_id: int, metadata: dict[str, Any]) -> dict[str, Any]:
+        allowed = ["title", "author", "style", "cover_path", "tags", "notes"]
+        values = {key: str(metadata[key]) for key in allowed if key in metadata}
+        if not values:
+            return self.get_copybook(copybook_id)
+        values["updated_at"] = _now()
+        assignments = ", ".join(f"{key} = ?" for key in values)
+        with self.connect() as conn:
+            conn.execute(
+                f"UPDATE copybooks SET {assignments} WHERE id = ?",
+                [*values.values(), copybook_id],
+            )
+        return self.get_copybook(copybook_id)
+
+    def create_page(self, data: dict[str, Any]) -> dict[str, Any]:
+        with self.connect() as conn:
+            cur = conn.execute(
+                """
+                INSERT INTO pages (copybook_id, page_no, source_path, width, height, thumb_path)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    data["copybook_id"],
+                    data["page_no"],
+                    data["source_path"],
+                    data.get("width", 0),
+                    data.get("height", 0),
+                    data.get("thumb_path", ""),
+                ),
+            )
+            page_id = int(cur.lastrowid)
+        return self.get_page(page_id)
+
+    def update_page_thumb(self, page_id: int, thumb_path: Path) -> None:
+        with self.connect() as conn:
+            conn.execute("UPDATE pages SET thumb_path = ? WHERE id = ?", (str(thumb_path), page_id))
+
+    def list_pages(self, copybook_id: int) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM pages WHERE copybook_id = ? ORDER BY page_no",
+                (copybook_id,),
+            ).fetchall()
+        return [_row_to_dict(row) for row in rows]
+
+    def get_page(self, page_id: int) -> dict[str, Any]:
+        with self.connect() as conn:
+            row = conn.execute("SELECT * FROM pages WHERE id = ?", (page_id,)).fetchone()
+        if row is None:
+            raise ValueError(f"page not found: {page_id}")
+        return _row_to_dict(row)
+
+    def get_page_with_copybook(self, page_id: int) -> dict[str, Any]:
+        with self.connect() as conn:
+            row = conn.execute(
+                """
+                SELECT p.*, c.source_type AS copybook_source_type, c.source_path AS copybook_source_path,
+                       c.title AS copybook_title
+                FROM pages p
+                JOIN copybooks c ON c.id = p.copybook_id
+                WHERE p.id = ?
+                """,
+                (page_id,),
+            ).fetchone()
+        if row is None:
+            raise ValueError(f"page not found: {page_id}")
+        return _row_to_dict(row)
+
+    def add_queue_item(self, page_id: int, params: dict[str, Any]) -> dict[str, Any]:
+        with self.connect() as conn:
+            cur = conn.execute(
+                "INSERT INTO queue_items (page_id, params_json, created_at) VALUES (?, ?, ?)",
+                (page_id, json.dumps(params, ensure_ascii=False), _now()),
+            )
+            queue_id = int(cur.lastrowid)
+        return self.get_queue_item(queue_id)
+
+    def list_queue_items(self) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT q.*, p.page_no, p.copybook_id, c.title AS copybook_title
+                FROM queue_items q
+                JOIN pages p ON p.id = q.page_id
+                JOIN copybooks c ON c.id = p.copybook_id
+                ORDER BY q.created_at, q.id
+                """
+            ).fetchall()
+        return [_decode_params(_row_to_dict(row)) for row in rows]
+
+    def clear_queue_items(self) -> None:
+        with self.connect() as conn:
+            conn.execute("DELETE FROM queue_items")
+
+    def get_queue_item(self, item_id: int) -> dict[str, Any]:
+        with self.connect() as conn:
+            row = conn.execute(
+                """
+                SELECT q.*, p.page_no, p.copybook_id, c.title AS copybook_title
+                FROM queue_items q
+                JOIN pages p ON p.id = q.page_id
+                JOIN copybooks c ON c.id = p.copybook_id
+                WHERE q.id = ?
+                """,
+                (item_id,),
+            ).fetchone()
+        if row is None:
+            raise ValueError(f"queue item not found: {item_id}")
+        return _decode_params(_row_to_dict(row))
+
+    def update_queue_item(self, item_id: int, params: dict[str, Any]) -> dict[str, Any]:
+        current = self.get_queue_item(item_id)["params"]
+        current.update(params)
+        with self.connect() as conn:
+            conn.execute(
+                "UPDATE queue_items SET params_json = ? WHERE id = ?",
+                (json.dumps(current, ensure_ascii=False), item_id),
+            )
+        return self.get_queue_item(item_id)
+
+    def list_presets(self) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            rows = conn.execute("SELECT * FROM presets ORDER BY updated_at DESC, id DESC").fetchall()
+        return [_decode_params(_row_to_dict(row)) for row in rows]
+
+    def create_preset(self, data: dict[str, Any]) -> dict[str, Any]:
+        now = _now()
+        with self.connect() as conn:
+            cur = conn.execute(
+                """
+                INSERT INTO presets
+                    (name, background_image, ink_color, foreground_threshold, mode, column_detection,
+                     params_json, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    data["name"],
+                    data.get("background_image", ""),
+                    data.get("ink_color", "#000000"),
+                    int(data.get("foreground_threshold", 18)),
+                    data.get("mode", "row"),
+                    data.get("column_detection", "gray"),
+                    json.dumps(data.get("params", {}), ensure_ascii=False),
+                    now,
+                    now,
+                ),
+            )
+            preset_id = int(cur.lastrowid)
+        return self.get_preset(preset_id)
+
+    def get_preset(self, preset_id: int) -> dict[str, Any]:
+        with self.connect() as conn:
+            row = conn.execute("SELECT * FROM presets WHERE id = ?", (preset_id,)).fetchone()
+        if row is None:
+            raise ValueError(f"preset not found: {preset_id}")
+        return _decode_params(_row_to_dict(row))
+
+    def update_preset(self, preset_id: int, data: dict[str, Any]) -> dict[str, Any]:
+        current = self.get_preset(preset_id)
+        merged = {**current, **data, "updated_at": _now()}
+        with self.connect() as conn:
+            conn.execute(
+                """
+                UPDATE presets
+                SET name = ?, background_image = ?, ink_color = ?, foreground_threshold = ?,
+                    mode = ?, column_detection = ?, params_json = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    merged["name"],
+                    merged.get("background_image", ""),
+                    merged.get("ink_color", "#000000"),
+                    int(merged.get("foreground_threshold", 18)),
+                    merged.get("mode", "row"),
+                    merged.get("column_detection", "gray"),
+                    json.dumps(merged.get("params", {}), ensure_ascii=False),
+                    merged["updated_at"],
+                    preset_id,
+                ),
+            )
+        return self.get_preset(preset_id)
+
+    def delete_preset(self, preset_id: int) -> None:
+        with self.connect() as conn:
+            conn.execute("DELETE FROM presets WHERE id = ?", (preset_id,))
+
+    def record_export(self, output_path: Path, page_count: int) -> None:
+        with self.connect() as conn:
+            conn.execute(
+                "INSERT INTO exports (output_path, page_count, created_at) VALUES (?, ?, ?)",
+                (str(output_path), page_count, _now()),
+            )
+
+    def get_settings(self) -> dict[str, str]:
+        with self.connect() as conn:
+            rows = conn.execute("SELECT key, value FROM settings").fetchall()
+        return {str(row["key"]): str(row["value"]) for row in rows}
+
+    def update_settings(self, settings: dict[str, Any]) -> dict[str, str]:
+        with self.connect() as conn:
+            for key, value in settings.items():
+                conn.execute(
+                    "INSERT INTO settings (key, value) VALUES (?, ?) "
+                    "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                    (str(key), str(value)),
+                )
+        return self.get_settings()
+
+
+def _now() -> int:
+    return int(time.time())
+
+
+def _ensure_column(conn: sqlite3.Connection, table: str, column: str, definition: str) -> None:
+    rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
+    if column in {str(row["name"]) for row in rows}:
+        return
+    conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+
+
+def _row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
+    return {key: row[key] for key in row.keys()}
+
+
+def _decode_params(data: dict[str, Any]) -> dict[str, Any]:
+    if "params_json" in data:
+        data["params"] = json.loads(data.pop("params_json") or "{}")
+    return data
