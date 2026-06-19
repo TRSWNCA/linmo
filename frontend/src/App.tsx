@@ -42,9 +42,12 @@ import {
   Save24Regular,
   Settings24Regular,
 } from "@fluentui/react-icons";
+import packageJson from "../package.json";
 import type { Api, Copybook, Page, Preset, QueueItem } from "./types";
 
 type View = "home" | "library" | "make" | "presets" | "settings";
+
+const APP_VERSION = `v${packageJson.version}`;
 
 const fallbackApi: Api = {
   async get_home_stats() {
@@ -148,10 +151,7 @@ export function App() {
         <aside className="navRail">
           <div className="brandBlock">
             <img className="brandMark" src="/icon-256.png" alt="Linmo" />
-            <div>
-              <Text weight="semibold">Linmo</Text>
-              <Text size={200} className="mutedText">本地临摹制帖</Text>
-            </div>
+            <Text weight="semibold">Linmo</Text>
           </div>
           <NavButton icon={<Home24Regular />} active={view === "home"} onClick={() => setView("home")}>首页</NavButton>
           <NavButton icon={<BookOpen24Regular />} active={view === "library"} onClick={() => setView("library")}>藏帖阁</NavButton>
@@ -193,6 +193,7 @@ function TitleBar() {
       <div className="titleBarDrag">
         <img className="titleBarIcon" src="/icon-256.png" alt="" />
         <span className="titleBarLabel">Linmo</span>
+        <span className="titleBarVersion">{APP_VERSION}</span>
       </div>
       <div className="titleBarControls">
         <Button
@@ -226,6 +227,7 @@ function Home({ stats }: { stats: { copybooks: number; exported_pages: number } 
     <section className="homeView">
       <img className="homeMark" src="/icon-512.png" alt="Linmo" />
       <Title1>Linmo</Title1>
+      <Text className="homeDescription">本地临摹制帖</Text>
       <div className="homeStats">
         <Badge size="extra-large" appearance="filled">已藏 {stats.copybooks} 帖</Badge>
         <Badge size="extra-large" appearance="tint">已导出 {stats.exported_pages} 页</Badge>

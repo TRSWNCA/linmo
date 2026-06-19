@@ -64,6 +64,12 @@ textarea {
   letter-spacing: 0.02em;
 }
 
+.titleBarVersion {
+  font-size: 11px;
+  font-weight: 500;
+  color: #707070;
+}
+
 .titleBarControls {
   display: flex;
   align-items: center;
@@ -223,6 +229,11 @@ textarea {
   width: 132px;
   height: 132px;
   border-radius: 24px;
+}
+
+.homeDescription {
+  margin-top: -8px;
+  color: #616161;
 }
 
 .homeStats {
