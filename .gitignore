@@ -17,3 +17,4 @@ frontend/dist/
 # Local app data
 app_data/
 outputs/
+resources/

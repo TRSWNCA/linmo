@@ -1,50 +1,135 @@
 # Linmo
 
-Linmo is a command-line tool for creating calligraphy practice pages from copybook PDFs.
+Linmo 是一个本地书法临摹制帖工具，用来把 PDF 或图片书帖转换成更适合练习的临摹页。
 
-First-version target:
+它可以识别书帖中的横排行或竖排栏，提取字迹和线条，插入练习空白区，并导出为 PDF 或 PNG。
 
-- read a PDF page;
-- auto-detect the main rows or vertical copybook columns;
-- crop away page headers and side labels;
-- insert a white blank practice strip next to each source row or column;
-- export PNG or PDF.
+## 核心功能
 
-## Usage
+- 导入 PDF、单张图片或图片目录。
+- 自动识别横排行或竖排栏。
+- 为原帖内容生成对应练习区。
+- 支持保留原图，也支持去除原背景后重新绘制字迹。
+- 支持自定义字色、前景阈值、背景图。
+- 支持 PDF 和 PNG 导出。
+- 提供本地 GUI：藏帖、封面管理、页面预览、制作队列、导出预览、预设和设置。
+- 所有数据保存在本机，不需要账号或云同步。
+
+## 安装
+
+当前项目暂未提供打包好的安装器，需要从源码运行。
+
+需要：
+
+- Python 3.12+
+- uv
+- Node.js / npm
+
+安装 Python 依赖：
+
+```bash
+uv sync
+```
+
+安装并构建前端：
+
+```bash
+cd frontend
+npm install
+npm run build
+cd ..
+```
+
+## 启动 GUI
+
+```bash
+uv run linmo-app
+```
+
+默认窗口大小为 `1480x960`，最小大小为 `980x640`。
+
+默认数据目录：
+
+```text
+~/.local/share/linmo
+```
+
+可以通过环境变量指定其它数据目录：
+
+```bash
+LINMO_APP_DATA=/tmp/linmo-app uv run linmo-app
+```
+
+## GUI 使用方式
+
+### 首页
+
+显示应用图标、已收藏书帖数量和已导出页数。
+
+### 藏帖阁
+
+- 点击“导入”导入 PDF、图片或图片目录。
+- 导入文件会复制到 Linmo 的本地应用库。
+- 书帖以封面墙展示。
+- 双击封面进入该帖所有页面的缩略图预览。
+- 右键封面可编辑名称、作者和展示封面。
+- 在页面预览中选择页面后，可加入制作队列。
+
+### 生成帖
+
+- 顶部调整当前页面的生成参数。
+- 中间查看原图和导出预览。
+- 原图和预览图支持鼠标滚轮缩放、拖动查看位置、双击复位。
+- 底部显示制作队列缩略图。
+- 缩略图可拖拽排序，导出时按当前顺序生成 PDF。
+- 制作队列是一次性队列，每次打开应用时默认为空。
+
+### 预设
+
+用于保存常用导出配置，例如背景图、字色、前景阈值、默认模式等。
+
+### 设置
+
+用于配置本地数据目录、默认 DPI、默认导出目录等。
+
+## CLI 使用
+
+除了 GUI，Linmo 也提供命令行工具。
+
+竖排书帖：
 
 ```bash
 uv run linmo resources/硬笔行书红楼梦诗词.pdf \
   --pages 41 \
   --mode col \
-  --blank-style white \
   --blank-ratio 1.0 \
   --dpi 300 \
   --out outputs/page41-copy.pdf
 ```
 
-PNG output is also supported:
-
-```bash
-uv run linmo resources/硬笔行书红楼梦诗词.pdf \
-  --pages 41 \
-  --mode col \
-  --out outputs/page41-copy.png
-```
-
-Horizontal row mode is available for ruled pages:
+横排书帖：
 
 ```bash
 uv run linmo "resources/吴玉生行楷 优美诗歌.pdf" \
   --pages 12 \
   --mode row \
-  --blank-style white \
   --blank-ratio 1.0 \
   --dpi 300 \
   --out outputs/wuyusheng-page12-copy.pdf
 ```
 
-To remove the original page background and redraw extracted text/lines on a
-texture:
+图片书帖：
+
+```bash
+uv run linmo resources/3.jpg \
+  --pages 1 \
+  --mode col \
+  --column-detection ink \
+  --foreground-threshold 35 \
+  --out outputs/3-auto-textured.pdf
+```
+
+去除原背景并使用背景图：
 
 ```bash
 uv run linmo resources/硬笔行书红楼梦诗词.pdf \
@@ -55,83 +140,50 @@ uv run linmo resources/硬笔行书红楼梦诗词.pdf \
   --out outputs/page41-copy-textured.pdf
 ```
 
-Passing `--background-image` automatically enables foreground extraction. Use
-`--foreground-threshold` when a scan is too faint or too noisy.
+常用参数：
 
-`--rows` and `--columns` are optional. Omit them for auto-detection; provide
-them only when a page needs manual correction.
+- `--pages`：页码范围，例如 `41`、`1-3`、`1,3,5`。
+- `--mode`：`row` 或 `col`。
+- `--column-detection`：`gray` 或 `ink`。
+- `--blank-ratio`：练习区相对原行/栏的比例。
+- `--foreground-threshold`：前景提取阈值。
+- `--ink-color`：重绘字迹颜色。
+- `--background-image`：输出背景图。
+- `--rows` / `--columns`：手动指定行数或列数；默认可不传。
+- `--out`：输出 `.pdf` 或 `.png`。
 
-For old vertical JPG scans without gray column panels, use ink-based column
-detection:
+## Linux 运行说明
 
-```bash
-uv run linmo resources/3.jpg \
-  --pages 1 \
-  --mode col \
-  --column-detection ink \
-  --background-image /home/cyc/Downloads/huaban-2932812013.jpg \
-  --ink-color '#000000' \
-  --foreground-threshold 35 \
-  --out outputs/3-auto-textured.pdf
-```
+Linux 下 GUI 默认使用 Qt 后端。项目会通过 Python 依赖安装 `PySide6`、`qtpy` 和 `pywebview`。
 
-## Tests
-
-```bash
-PYTHONPATH=src python -m unittest discover -s tests
-```
-
-## GUI
-
-Install Python and frontend dependencies, build the React app, then launch the
-local desktop GUI:
-
-```bash
-uv sync
-cd frontend
-npm install
-npm run build
-cd ..
-uv run linmo-app
-```
-
-The GUI stores imported copybooks, thumbnails, presets, queue state, and export
-records under `~/.local/share/linmo` by default. During development you can use
-another location:
-
-```bash
-LINMO_APP_DATA=/tmp/linmo-app uv run linmo-app
-```
-
-pywebview debugging is disabled by default. Enable it only when you need
-Chromium remote inspection:
-
-```bash
-LINMO_WEBVIEW_DEBUG=1 uv run linmo-app
-```
-
-On Linux, Linmo starts pywebview with the Qt backend by default. The project
-installs `PySide6` and `qtpy` through `uv sync`, so GTK/PyGObject is not
-required for the default path. To force another pywebview backend:
-
-```bash
-LINMO_WEBVIEW_GUI=gtk uv run linmo-app
-```
-
-On Manjaro/Arch, Qt may also require the system XCB cursor library. If startup
-fails with `Could not load the Qt platform plugin "xcb"` or mentions
-`xcb-cursor0`, install:
+Manjaro / Arch 如果启动时报 `Could not load the Qt platform plugin "xcb"` 或 `xcb-cursor0`，安装：
 
 ```bash
 sudo pacman -S xcb-util-cursor
 ```
 
-For X11 window managers such as i3wm, Linmo disables Qt WebEngine GPU
-composition by default to avoid Chromium `dma_buf` texture errors such as
-`Compositor returned null texture`. It keeps Qt's XCB OpenGL integration
-enabled, because Qt WebEngine still needs an OpenGL context even when Chromium
-GPU compositing is disabled. To opt back into hardware acceleration:
+X11 / i3wm 下默认禁用 Chromium GPU 合成，以规避 `dma_buf` 纹理问题。需要强制启用硬件加速时：
 
 ```bash
 LINMO_WEBVIEW_ACCELERATION=1 uv run linmo-app
 ```
+
+pywebview 调试默认关闭。需要 Chromium 远程调试时：
+
+```bash
+LINMO_WEBVIEW_DEBUG=1 uv run linmo-app
+```
+
+## 数据与隐私
+
+Linmo 是本地单机工具。导入的书帖、缩略图、预设、导出记录和设置默认保存在：
+
+```text
+~/.local/share/linmo
+```
+
+Linmo 不包含账号系统、云同步或远程上传逻辑。
+
+## License
+
+Linmo 使用 MIT License。详见 [LICENSE](LICENSE)。
