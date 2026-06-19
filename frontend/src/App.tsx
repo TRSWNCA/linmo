@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { MouseEvent as ReactMouseEvent, ReactElement, WheelEvent as ReactWheelEvent } from "react";
+import type { MouseEvent as ReactMouseEvent, PointerEvent as ReactPointerEvent, ReactElement, WheelEvent as ReactWheelEvent } from "react";
 import {
   Badge,
   Button,
@@ -116,6 +116,9 @@ const fallbackApi: Api = {
   async choose_cover_image() {
     return "";
   },
+  async window_move_by(delta_x, delta_y) {
+    window.moveBy(delta_x, delta_y);
+  },
   async window_minimize() {},
   async window_toggle_maximize() {},
   async window_close() {},
@@ -192,9 +195,46 @@ function pageThumbClass(selected: boolean, queued: boolean) {
 }
 
 function TitleBar() {
+  const titleDrag = useRef<{ pointerId: number; screenX: number; screenY: number } | null>(null);
+
+  function startTitleDrag(event: ReactPointerEvent<HTMLDivElement>) {
+    if (event.button !== 0) return;
+    event.preventDefault();
+    event.currentTarget.setPointerCapture(event.pointerId);
+    titleDrag.current = {
+      pointerId: event.pointerId,
+      screenX: event.screenX,
+      screenY: event.screenY,
+    };
+  }
+
+  function moveTitleDrag(event: ReactPointerEvent<HTMLDivElement>) {
+    const drag = titleDrag.current;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    event.preventDefault();
+    const deltaX = Math.round(event.screenX - drag.screenX);
+    const deltaY = Math.round(event.screenY - drag.screenY);
+    if (deltaX || deltaY) {
+      void api().window_move_by(deltaX, deltaY);
+      titleDrag.current = { ...drag, screenX: event.screenX, screenY: event.screenY };
+    }
+  }
+
+  function stopTitleDrag(event: ReactPointerEvent<HTMLDivElement>) {
+    if (titleDrag.current?.pointerId === event.pointerId) {
+      titleDrag.current = null;
+    }
+  }
+
   return (
     <header className="titleBar" onDoubleClick={() => api().window_toggle_maximize()}>
-      <div className="titleBarDrag">
+      <div
+        className="titleBarDrag"
+        onPointerDown={startTitleDrag}
+        onPointerMove={moveTitleDrag}
+        onPointerUp={stopTitleDrag}
+        onPointerCancel={stopTitleDrag}
+      >
         <img className="titleBarIcon" src="/icon-256.png" alt="" />
         <span className="titleBarLabel">Linmo</span>
         <span className="titleBarVersion">{APP_VERSION}</span>
@@ -607,6 +647,15 @@ function Maker({ setMessage, refreshStats }: { setMessage: (value: string) => vo
     });
   }
 
+  function handleQueuePointerMove(event: ReactPointerEvent<HTMLDivElement>) {
+    if (draggingId === null) return;
+    event.preventDefault();
+    const element = document.elementFromPoint(event.clientX, event.clientY);
+    const target = element?.closest("[data-queue-id]") as HTMLElement | null;
+    const targetId = Number(target?.dataset.queueId || "");
+    if (Number.isFinite(targetId)) moveQueueItem(targetId);
+  }
+
   useEffect(() => {
     load().catch((error) => setMessage(String(error)));
   }, []);
@@ -674,21 +723,29 @@ function Maker({ setMessage, refreshStats }: { setMessage: (value: string) => vo
         )}
       </div>
 
-      <div className="queueStrip" aria-label="制作队列缩略图">
+      <div
+        className={draggingId === null ? "queueStrip" : "queueStrip sorting"}
+        aria-label="制作队列缩略图"
+        onPointerMove={handleQueuePointerMove}
+        onPointerUp={() => setDraggingId(null)}
+        onPointerCancel={() => setDraggingId(null)}
+      >
         {items.map((item) => (
           <button
             key={item.id}
-            className={item.id === activeId ? "queueThumb active" : "queueThumb"}
-            draggable
-            onClick={() => setActiveId(item.id)}
-            onDragStart={() => setDraggingId(item.id)}
-            onDragOver={(event) => event.preventDefault()}
-            onDrop={() => moveQueueItem(item.id)}
-            onDragEnd={() => setDraggingId(null)}
+            className={["queueThumb", item.id === activeId ? "active" : "", item.id === draggingId ? "sorting" : ""].filter(Boolean).join(" ")}
+            data-queue-id={item.id}
+            onPointerDown={(event) => {
+              if (event.button !== 0) return;
+              event.preventDefault();
+              event.currentTarget.setPointerCapture(event.pointerId);
+              setActiveId(item.id);
+              setDraggingId(item.id);
+            }}
             type="button"
           >
             <div className="queueThumbImage">
-              {queueThumbs[item.page_id] ? <img src={queueThumbs[item.page_id]} alt={`${item.copybook_title} 第 ${item.page_no} 页`} /> : <Spinner size="tiny" />}
+              {queueThumbs[item.page_id] ? <img src={queueThumbs[item.page_id]} alt={`${item.copybook_title} 第 ${item.page_no} 页`} draggable={false} /> : <Spinner size="tiny" />}
             </div>
             <Text size={100} truncate>{item.copybook_title}</Text>
             <Text size={100} className="mutedText">第 {item.page_no} 页</Text>

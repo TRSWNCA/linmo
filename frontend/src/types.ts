@@ -60,6 +60,7 @@ export type Api = {
   choose_import_files(): Promise<string[]>;
   choose_background_image(): Promise<string>;
   choose_cover_image(): Promise<string>;
+  window_move_by(delta_x: number, delta_y: number): Promise<void>;
   window_minimize(): Promise<void>;
   window_toggle_maximize(): Promise<void>;
   window_close(): Promise<void>;

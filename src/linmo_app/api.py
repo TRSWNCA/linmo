@@ -15,6 +15,15 @@ class LinmoApi:
         self.services.repo.clear_queue_items()
 
     # -- window chrome helpers --
+    def window_move_by(self, delta_x: int, delta_y: int) -> None:
+        try:
+            window = _current_window()
+            if window is None:
+                return
+            window.move(int(window.x or 0) + int(delta_x), int(window.y or 0) + int(delta_y))
+        except Exception:
+            pass
+
     def window_minimize(self) -> None:
         _call_window("minimize")
 
@@ -116,13 +125,18 @@ class LinmoApi:
 
 def _call_window(action: str) -> None:
     try:
-        import webview
-        window = webview.windows[0] if webview.windows else None
+        window = _current_window()
         if window is None:
             return
         getattr(window, action)()
     except Exception:
         pass
+
+
+def _current_window():
+    import webview
+
+    return webview.windows[0] if webview.windows else None
 
 
 def _open_file_dialog(allow_multiple: bool, images_only: bool = False) -> list[str]:

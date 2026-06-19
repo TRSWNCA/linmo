@@ -25,6 +25,7 @@ def main() -> None:
         height=960,
         min_size=(980, 640),
         frameless=True,
+        easy_drag=False,
     )
     _window_ref = window  # keep alive so GC doesn't kill it
     webview.start(debug=_debug_enabled(), gui=_preferred_gui())
