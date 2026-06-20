@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+import urllib.error
 from pathlib import Path
 
 import fitz
@@ -9,7 +10,7 @@ from PIL import Image, ImageDraw
 
 from linmo_app.api import LinmoApi
 from linmo_app.paths import AppPaths
-from linmo_app.services import LinmoServices
+from linmo_app.services import LinmoServices, _WebDavClient
 
 
 class AppServicesTests(unittest.TestCase):
@@ -45,6 +46,75 @@ class AppServicesTests(unittest.TestCase):
             output = services.export_queue_to_pdf([queue_item["id"]])
             self.assertTrue(output.exists())
             self.assertEqual(services.repo.stats()["exported_pages"], 1)
+
+    def test_generated_post_export_default_name_and_files(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "sample.png"
+            _make_ruled_image(source)
+            services = LinmoServices(AppPaths(root / "data"))
+
+            imported = services.import_copybooks([str(source)])
+            page = services.repo.list_pages(imported[0]["id"])[0]
+            queue_item = services.repo.add_queue_item(
+                page["id"],
+                {"mode": "row", "blank_ratio": 0.5, "ink_color": "#000000"},
+            )
+
+            self.assertEqual(services.next_generated_post_name(), "卷一")
+            post = services.export_queue_to_generated_post([queue_item["id"]], "卷一")
+            self.assertEqual(post["name"], "卷一")
+            self.assertEqual(post["page_count"], 1)
+            self.assertEqual(post["result_count"], 0)
+            self.assertTrue(Path(post["original_pdf_path"]).exists())
+            self.assertTrue(Path(post["thumb_path"]).exists())
+            self.assertEqual(services.next_generated_post_name(), "卷二")
+            self.assertEqual(len(services.list_generated_posts()), 1)
+
+            files = services.list_generated_post_files(post["id"])
+            self.assertEqual(len(files), 1)
+            self.assertEqual(files[0]["kind"], "original")
+            self.assertEqual(files[0]["name"], "original.pdf")
+            self.assertEqual(services.repo.stats()["exported_pages"], 1)
+
+    def test_generated_post_can_export_png_pages(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            image_dir = root / "pages"
+            image_dir.mkdir()
+            _make_ruled_image(image_dir / "1.png")
+            _make_ruled_image(image_dir / "2.png")
+            services = LinmoServices(AppPaths(root / "data"))
+
+            imported = services.import_copybooks([str(image_dir)])
+            pages = services.repo.list_pages(imported[0]["id"])
+            queue_items = [
+                services.repo.add_queue_item(page["id"], {"mode": "row", "blank_ratio": 0.5, "ink_color": "#000000"})
+                for page in pages
+            ]
+
+            post = services.export_queue_to_generated_post([item["id"] for item in queue_items], "卷一", output_format="png")
+
+            self.assertEqual(post["output_format"], "png")
+            self.assertEqual(post["page_count"], 2)
+            self.assertTrue(Path(post["original_pdf_path"]).exists())
+            self.assertEqual(Path(post["original_pdf_path"]).suffix, ".png")
+            files = services.list_generated_post_files(post["id"])
+            self.assertEqual([file["name"] for file in files], ["001.png", "002.png"])
+            self.assertTrue(Path(post["thumb_path"]).exists())
+            self.assertEqual(services.repo.stats()["exported_pages"], 2)
+
+    def test_png_target_device_limits_height_by_split_direction(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            services = LinmoServices(AppPaths(Path(tmp) / "data"))
+            services.repo.update_settings({"target_device_preset": "ipad_mini_retina"})
+            tall = Image.new("RGB", (1000, 5000), (255, 255, 255))
+
+            vertical = services._scale_png_for_target(tall, "col")
+            horizontal = services._scale_png_for_target(tall, "row")
+
+            self.assertEqual(vertical.height, 2048)
+            self.assertEqual(horizontal.height, 4096)
 
     def test_api_start_clears_previous_queue_items(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -122,6 +192,17 @@ class AppServicesTests(unittest.TestCase):
             self.assertTrue(api.delete_preset(preset["id"])["ok"])
             self.assertEqual(api.list_presets(), [])
 
+    def test_webdav_treats_gone_collection_as_missing_and_uses_collection_urls(self) -> None:
+        client = _WebDavClient.__new__(_WebDavClient)
+        client.base_url = "https://dav.example.test/dav/"
+        client._opener = _FakeWebDavOpener()
+
+        client.ensure_dir("Linmo")
+
+        self.assertEqual(client._opener.calls[0], ("PROPFIND", "https://dav.example.test/dav/Linmo/"))
+        self.assertEqual(client._opener.calls[1], ("MKCOL", "https://dav.example.test/dav/Linmo/"))
+        self.assertFalse(client.exists("Linmo/missing.pdf"))
+
 
 def _make_ruled_image(path: Path) -> None:
     image = Image.new("RGB", (360, 260), (255, 255, 255))
@@ -140,6 +221,29 @@ def _make_pdf(path: Path) -> None:
         page.insert_text((60, 120), f"Page {index + 1}", fontsize=24)
     document.save(path)
     document.close()
+
+
+class _FakeWebDavOpener:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, str]] = []
+
+    def open(self, request, timeout: int):
+        method = request.get_method()
+        self.calls.append((method, request.full_url))
+        if method == "PROPFIND":
+            raise urllib.error.HTTPError(request.full_url, 410, "Gone", {}, None)
+        return _FakeWebDavResponse()
+
+
+class _FakeWebDavResponse:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, traceback) -> None:
+        return None
+
+    def read(self) -> bytes:
+        return b""
 
 
 if __name__ == "__main__":

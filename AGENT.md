@@ -38,7 +38,10 @@ GUI：
 - 制作队列每次启动应用时清空，属于一次会话内的临时队列。
 - 生成帖页面顶部是参数栏，中间是原图/预览图，底部是可拖拽排序的缩略图队列。
 - 原图和预览图默认填满宽度，可用鼠标滚轮缩放、拖动查看位置、双击复位。
-- 可导出队列为 PDF，并记录导出页数。
+- 可导出队列为 PDF 或 PNG，并记录导出页数；多页 PNG 拆成多张图片。
+- PNG 导出按设置页目标 iPad 设备缩放：`col` 最高为设备长边，`row` 最高为设备长边的两倍。
+- 练帖阁保存已生成的 PDF，使用封面墙展示。
+- 练帖阁单帖可通过 WebDAV 同步，远端每帖一个目录，包含 `original.pdf` 和 `results/*.pdf`。
 - 预设和设置页面已有 MVP 实现。
 
 ## 目录结构
@@ -86,6 +89,8 @@ library/{copybook_id}/pages/{page_no}.{ext}
 cache/thumbs/{page_id}.jpg
 cache/previews/*.jpg
 exports/{timestamp}-linmo.pdf
+generated/{post_id}/original.pdf
+generated/{post_id}/results/*.pdf
 linmo.sqlite3
 ```
 
@@ -165,6 +170,7 @@ npm run build
 - SQLite schema 变更要在 `Repository.init_schema()` 中加入兼容已有库的迁移逻辑。
 - 需要展示图片给前端时，后端返回 data URL。
 - 制作队列启动时清空：`LinmoApi.__init__()` 会调用 `clear_queue_items()`。
+- WebDAV 凭据当前保存在本机 settings；同步以单帖为单位，远端同名 `original.pdf` 覆盖本地。
 
 ## Linux/pywebview 注意事项
 
@@ -186,7 +192,7 @@ LINMO_WEBVIEW_DEBUG=1 uv run linmo-app
 
 ## 非目标
 
-- 不做云同步、账号系统、插件系统。
+- 不做账号系统、插件系统或后台全库自动同步。
 - 不做 OCR 或字符识别。
 - 不做通用 PDF 编辑器。
 - 不追求一次性完美处理所有版式；优先保证已有样例和常见书帖路径稳定。

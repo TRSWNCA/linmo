@@ -26,6 +26,10 @@ class AppPaths:
         return self.root / "cache" / "previews"
 
     @property
+    def generated_thumbs_dir(self) -> Path:
+        return self.root / "cache" / "generated-thumbs"
+
+    @property
     def presets_dir(self) -> Path:
         return self.root / "presets"
 
@@ -33,14 +37,20 @@ class AppPaths:
     def exports_dir(self) -> Path:
         return self.root / "exports"
 
+    @property
+    def generated_dir(self) -> Path:
+        return self.root / "generated"
+
     def ensure(self) -> None:
         for path in [
             self.root,
             self.library_dir,
             self.thumbs_dir,
             self.previews_dir,
+            self.generated_thumbs_dir,
             self.presets_dir,
             self.exports_dir,
+            self.generated_dir,
         ]:
             path.mkdir(parents=True, exist_ok=True)
 
