@@ -95,13 +95,8 @@ def detect_gray_columns(
         for start, end in _contiguous_runs(candidate_x)
         if end - start + 1 >= min_width
     ]
-
-    if expected_columns is not None and len(columns) != expected_columns:
-        raise ValueError(
-            "detected "
-            f"{len(columns)} gray columns, expected {expected_columns}; "
-            "try changing --columns or the gray detection thresholds"
-        )
+    if not columns:
+        raise ValueError("could not detect gray columns")
 
     left = min(column.left for column in columns)
     right = max(column.right for column in columns)
@@ -113,6 +108,15 @@ def detect_gray_columns(
         raise ValueError("could not detect the vertical bounds of the gray columns")
 
     top, bottom = max(row_runs, key=lambda run: run[1] - run[0])
+    columns = _split_gray_columns_by_bright_separators(gray, columns, top, bottom, min_width)
+
+    if expected_columns is not None and len(columns) != expected_columns:
+        raise ValueError(
+            "detected "
+            f"{len(columns)} gray columns after separator splitting, expected {expected_columns}; "
+            "try changing --columns or the gray detection thresholds"
+        )
+
     return DetectedColumns(columns=columns, top=top, bottom=bottom)
 
 
@@ -131,6 +135,17 @@ def detect_ink_columns(
         raise ValueError("expected_columns must be >= 1")
     if not 0 <= ink_max <= 255:
         raise ValueError("ink_max must satisfy 0 <= ink_max <= 255")
+
+    red_grid = _detect_red_column_grid(image)
+    if red_grid is not None:
+        columns, top, bottom = red_grid
+        if expected_columns is not None and len(columns) != expected_columns:
+            raise ValueError(
+                "detected "
+                f"{len(columns)} red-ruled columns, expected {expected_columns}; "
+                "try changing --columns or the input crop"
+            )
+        return DetectedColumns(columns=columns, top=top, bottom=bottom)
 
     mask = _dark_neutral_mask(image, ink_max)
     height, width = mask.shape
@@ -398,6 +413,83 @@ def _ink_runs_to_column_slots(
 
         columns.append(ColumnBounds(max(0, left), min(width - 1, right)))
     return columns
+
+
+def _split_gray_columns_by_bright_separators(
+    gray: np.ndarray,
+    columns: list[ColumnBounds],
+    top: int,
+    bottom: int,
+    min_width: int,
+) -> list[ColumnBounds]:
+    split_columns: list[ColumnBounds] = []
+    separator_threshold = 200
+    separator_coverage_ratio = 0.25
+
+    for column in columns:
+        crop = gray[top : bottom + 1, column.left : column.right + 1]
+        if crop.shape[1] < min_width * 2:
+            split_columns.append(column)
+            continue
+
+        bright = crop >= separator_threshold
+        min_separator_pixels = max(1, int(crop.shape[0] * separator_coverage_ratio))
+        separator_x = np.flatnonzero(bright.sum(axis=0) >= min_separator_pixels)
+        separator_runs = _contiguous_runs(separator_x)
+        if len(separator_runs) < 2:
+            split_columns.append(column)
+            continue
+
+        local_slots = []
+        for left_separator, right_separator in zip(separator_runs, separator_runs[1:]):
+            left = column.left + left_separator[1] + 1
+            right = column.left + right_separator[0] - 1
+            if right - left + 1 >= min_width:
+                local_slots.append(ColumnBounds(left, right))
+
+        split_columns.extend(local_slots or [column])
+
+    return split_columns
+
+
+def _detect_red_column_grid(image: Image.Image) -> tuple[list[ColumnBounds], int, int] | None:
+    rgb = np.asarray(image.convert("RGB"), dtype=np.int16)
+    height, width = rgb.shape[:2]
+    red_mask = (
+        (rgb[:, :, 0] > 150)
+        & (rgb[:, :, 0] > rgb[:, :, 1] + 45)
+        & (rgb[:, :, 0] > rgb[:, :, 2] + 45)
+    )
+
+    min_vertical_pixels = max(3, int(height * 0.35))
+    candidate_x = np.flatnonzero(red_mask.sum(axis=0) >= min_vertical_pixels)
+    vertical_runs = _contiguous_runs(candidate_x)
+    if len(vertical_runs) < 3:
+        return None
+
+    centers = [(start + end) // 2 for start, end in vertical_runs]
+    min_slot_width = max(8, int(width * 0.035))
+    boundaries: list[int] = []
+    for center in centers:
+        if boundaries and center - boundaries[-1] < min_slot_width:
+            boundaries[-1] = (boundaries[-1] + center) // 2
+        else:
+            boundaries.append(center)
+
+    columns = [
+        ColumnBounds(left + 1, right - 1)
+        for left, right in zip(boundaries, boundaries[1:])
+        if right - left - 1 >= min_slot_width
+    ]
+    if len(columns) < 2:
+        return None
+
+    grid_slice = red_mask[:, max(0, boundaries[0] - 1) : min(width, boundaries[-1] + 2)]
+    grid_y = np.flatnonzero(grid_slice.any(axis=1))
+    if grid_y.size == 0:
+        return None
+
+    return columns, int(grid_y.min()), int(grid_y.max())
 
 
 def _paste_original(

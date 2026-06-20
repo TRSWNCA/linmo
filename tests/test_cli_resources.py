@@ -7,7 +7,7 @@ import numpy as np
 from PIL import Image, ImageStat
 
 from linmo.cli import main as cli_main
-from linmo.image_pipeline import detect_ruled_rows
+from linmo.image_pipeline import detect_gray_columns, detect_ink_columns, detect_ruled_rows
 
 
 RESOURCE_DIR = Path(__file__).parent / "resources"
@@ -25,8 +25,10 @@ class CliResourcesTests(unittest.TestCase):
                 with Image.open(resource_path) as source_image:
                     source = source_image.convert("RGB")
                     mode_args = _mode_args_for(source)
+                    detected_parts = _detected_part_count(source, mode_args)
                     source_size = source.size
 
+                self.assertGreater(detected_parts, 1)
                 output_path = OUTPUT_DIR / f"{resource_path.stem}-practice.png"
                 cli_main(
                     [
@@ -77,6 +79,15 @@ def _detected_ruled_row_count(image: Image.Image) -> int:
         return len(detect_ruled_rows(image, expected_rows=None).rows)
     except ValueError:
         return 0
+
+
+def _detected_part_count(image: Image.Image, mode_args: list[str]) -> int:
+    mode = _arg_value(mode_args, "--mode")
+    if mode == "row":
+        return len(detect_ruled_rows(image, expected_rows=None).rows)
+    if _arg_value(mode_args, "--column-detection") == "gray":
+        return len(detect_gray_columns(image, expected_columns=None).columns)
+    return len(detect_ink_columns(image, expected_columns=None).columns)
 
 
 def _dark_neutral_midtone_coverage(image: Image.Image) -> float:
