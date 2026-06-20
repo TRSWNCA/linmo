@@ -104,6 +104,18 @@ class AppServicesTests(unittest.TestCase):
             self.assertTrue(Path(post["thumb_path"]).exists())
             self.assertEqual(services.repo.stats()["exported_pages"], 2)
 
+    def test_png_target_device_limits_height_by_split_direction(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            services = LinmoServices(AppPaths(Path(tmp) / "data"))
+            services.repo.update_settings({"target_device_preset": "ipad_mini_retina"})
+            tall = Image.new("RGB", (1000, 5000), (255, 255, 255))
+
+            vertical = services._scale_png_for_target(tall, "col")
+            horizontal = services._scale_png_for_target(tall, "row")
+
+            self.assertEqual(vertical.height, 2048)
+            self.assertEqual(horizontal.height, 4096)
+
     def test_api_start_clears_previous_queue_items(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

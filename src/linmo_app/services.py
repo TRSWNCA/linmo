@@ -21,6 +21,18 @@ from .repository import Repository
 
 IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tif", ".tiff"}
 GENERATED_FILE_SUFFIXES = {".pdf", ".png"}
+IPAD_DEVICE_PRESETS: dict[str, tuple[str, int, int]] = {
+    "ipad_mini_retina": ("iPad mini 5", 2048, 1536),
+    "ipad_mini_83": ("iPad mini 6/7", 2266, 1488),
+    "ipad_102": ("iPad 7/8/9", 2160, 1620),
+    "ipad_109_air": ("iPad 10/11, iPad Air 4/5/11-inch M-series", 2360, 1640),
+    "ipad_air_3": ("iPad Air 3", 2224, 1668),
+    "ipad_pro_11": ("iPad Pro 11-inch 2018-2022", 2388, 1668),
+    "ipad_pro_11_m4": ("iPad Pro 11-inch M4 and later", 2420, 1668),
+    "ipad_pro_129_air_13": ("iPad Pro 12.9-inch, iPad Air 13-inch M-series", 2732, 2048),
+    "ipad_pro_13_m4": ("iPad Pro 13-inch M4 and later", 2752, 2064),
+}
+DEFAULT_TARGET_DEVICE_PRESET = "ipad_109_air"
 
 
 class LinmoServices:
@@ -36,6 +48,7 @@ class LinmoServices:
             "webdav_username": "",
             "webdav_password": "",
             "webdav_remote_root": "Linmo",
+            "target_device_preset": DEFAULT_TARGET_DEVICE_PRESET,
         }
         current_settings = self.repo.get_settings()
         missing_defaults = {key: value for key, value in defaults.items() if key not in current_settings}
@@ -168,7 +181,7 @@ class LinmoServices:
         else:
             original_dir = post_dir / "original"
             original_dir.mkdir(parents=True, exist_ok=True)
-            images = self._render_queue_images(queue_item_ids, preset_id)
+            images = self._render_queue_images(queue_item_ids, preset_id, apply_png_target=True)
             saved_paths = self._save_png_pages(images, original_dir)
             original_path = saved_paths[0]
             self.repo.record_export(original_path, len(saved_paths))
@@ -367,7 +380,12 @@ class LinmoServices:
     def _generated_post_dir(self, post_id: int) -> Path:
         return self.paths.generated_dir / str(post_id)
 
-    def _render_queue_images(self, queue_item_ids: list[int], preset_id: int | None = None) -> list[Image.Image]:
+    def _render_queue_images(
+        self,
+        queue_item_ids: list[int],
+        preset_id: int | None = None,
+        apply_png_target: bool = False,
+    ) -> list[Image.Image]:
         if not queue_item_ids:
             raise ValueError("queue_item_ids cannot be empty")
         preset = self.repo.get_preset(preset_id) if preset_id else None
@@ -379,8 +397,22 @@ class LinmoServices:
             if preset:
                 params_dict = self._apply_preset(params_dict, preset)
             params = self._params_from_dict(params_dict)
-            images.append(process_image(self.load_page_image(page, dpi=params.dpi), params))
+            image = process_image(self.load_page_image(page, dpi=params.dpi), params)
+            if apply_png_target:
+                image = self._scale_png_for_target(image, params.mode)
+            images.append(image)
         return images
+
+    def _scale_png_for_target(self, image: Image.Image, mode: str) -> Image.Image:
+        settings = self.repo.get_settings()
+        preset_key = settings.get("target_device_preset", DEFAULT_TARGET_DEVICE_PRESET)
+        preset = IPAD_DEVICE_PRESETS.get(preset_key) or IPAD_DEVICE_PRESETS[DEFAULT_TARGET_DEVICE_PRESET]
+        long_side = max(preset[1], preset[2])
+        max_height = long_side if mode == "col" else long_side * 2
+        if image.height <= max_height:
+            return image
+        width = max(1, round(image.width * max_height / image.height))
+        return image.resize((width, max_height), Image.Resampling.LANCZOS)
 
     def _save_png_pages(self, images: list[Image.Image], output_dir: Path) -> list[Path]:
         saved_paths = []

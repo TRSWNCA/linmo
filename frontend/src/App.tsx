@@ -50,6 +50,18 @@ import type { Api, Copybook, GeneratedPost, GeneratedPostFile, Page, Preset, Que
 type View = "home" | "library" | "make" | "practice" | "presets" | "settings";
 
 const APP_VERSION = `v${packageJson.version}`;
+const TARGET_DEVICE_PRESETS = [
+  { key: "ipad_mini_retina", label: "iPad mini 5", width: 2048, height: 1536 },
+  { key: "ipad_mini_83", label: "iPad mini 6/7", width: 2266, height: 1488 },
+  { key: "ipad_102", label: "iPad 7/8/9", width: 2160, height: 1620 },
+  { key: "ipad_109_air", label: "iPad 10/11, iPad Air 4/5/11-inch M-series", width: 2360, height: 1640 },
+  { key: "ipad_air_3", label: "iPad Air 3", width: 2224, height: 1668 },
+  { key: "ipad_pro_11", label: "iPad Pro 11-inch 2018-2022", width: 2388, height: 1668 },
+  { key: "ipad_pro_11_m4", label: "iPad Pro 11-inch M4 and later", width: 2420, height: 1668 },
+  { key: "ipad_pro_129_air_13", label: "iPad Pro 12.9-inch, iPad Air 13-inch M-series", width: 2732, height: 2048 },
+  { key: "ipad_pro_13_m4", label: "iPad Pro 13-inch M4 and later", width: 2752, height: 2064 },
+];
+const DEFAULT_TARGET_DEVICE_PRESET = "ipad_109_air";
 
 const fallbackApi: Api = {
   async get_home_stats() {
@@ -1244,6 +1256,18 @@ function Settings({ setMessage }: { setMessage: (value: string) => void }) {
           <Field label="数据目录"><Input value={settings.data_dir || ""} onChange={(_, data) => setSettings({ ...settings, data_dir: data.value })} /></Field>
           <Field label="默认 DPI"><Input value={settings.default_dpi || "300"} onChange={(_, data) => setSettings({ ...settings, default_dpi: data.value })} /></Field>
           <Field label="默认导出目录"><Input value={settings.default_export_dir || ""} onChange={(_, data) => setSettings({ ...settings, default_export_dir: data.value })} /></Field>
+          <Field label="目标设备">
+            <Select
+              value={settings.target_device_preset || DEFAULT_TARGET_DEVICE_PRESET}
+              onChange={(event) => setSettings({ ...settings, target_device_preset: event.target.value })}
+            >
+              {TARGET_DEVICE_PRESETS.map((preset) => (
+                <option key={preset.key} value={preset.key}>
+                  {preset.label} · {preset.width} x {preset.height}
+                </option>
+              ))}
+            </Select>
+          </Field>
           <Field label="WebDAV 地址"><Input value={settings.webdav_url || ""} onChange={(_, data) => setSettings({ ...settings, webdav_url: data.value })} /></Field>
           <Field label="WebDAV 用户名"><Input value={settings.webdav_username || ""} onChange={(_, data) => setSettings({ ...settings, webdav_username: data.value })} /></Field>
           <Field label="WebDAV 应用密码"><Input type="password" value={settings.webdav_password || ""} onChange={(_, data) => setSettings({ ...settings, webdav_password: data.value })} /></Field>
