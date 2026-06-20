@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+import urllib.error
 from pathlib import Path
 
 import fitz
@@ -9,7 +10,7 @@ from PIL import Image, ImageDraw
 
 from linmo_app.api import LinmoApi
 from linmo_app.paths import AppPaths
-from linmo_app.services import LinmoServices
+from linmo_app.services import LinmoServices, _WebDavClient
 
 
 class AppServicesTests(unittest.TestCase):
@@ -152,6 +153,17 @@ class AppServicesTests(unittest.TestCase):
             self.assertTrue(api.delete_preset(preset["id"])["ok"])
             self.assertEqual(api.list_presets(), [])
 
+    def test_webdav_treats_gone_collection_as_missing_and_uses_collection_urls(self) -> None:
+        client = _WebDavClient.__new__(_WebDavClient)
+        client.base_url = "https://dav.example.test/dav/"
+        client._opener = _FakeWebDavOpener()
+
+        client.ensure_dir("Linmo")
+
+        self.assertEqual(client._opener.calls[0], ("PROPFIND", "https://dav.example.test/dav/Linmo/"))
+        self.assertEqual(client._opener.calls[1], ("MKCOL", "https://dav.example.test/dav/Linmo/"))
+        self.assertFalse(client.exists("Linmo/missing.pdf"))
+
 
 def _make_ruled_image(path: Path) -> None:
     image = Image.new("RGB", (360, 260), (255, 255, 255))
@@ -170,6 +182,29 @@ def _make_pdf(path: Path) -> None:
         page.insert_text((60, 120), f"Page {index + 1}", fontsize=24)
     document.save(path)
     document.close()
+
+
+class _FakeWebDavOpener:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, str]] = []
+
+    def open(self, request, timeout: int):
+        method = request.get_method()
+        self.calls.append((method, request.full_url))
+        if method == "PROPFIND":
+            raise urllib.error.HTTPError(request.full_url, 410, "Gone", {}, None)
+        return _FakeWebDavResponse()
+
+
+class _FakeWebDavResponse:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, traceback) -> None:
+        return None
+
+    def read(self) -> bytes:
+        return b""
 
 
 if __name__ == "__main__":

@@ -479,23 +479,24 @@ class _WebDavClient:
             raise ValueError("请先在设置中填写 WebDAV 地址、用户名和应用密码")
         return cls(url, username, password)
 
-    def exists(self, path: str) -> bool:
+    def exists(self, path: str, collection: bool = False) -> bool:
         try:
-            self._request("PROPFIND", path, headers={"Depth": "0"})
+            self._request("PROPFIND", path, headers={"Depth": "0"}, collection=collection)
             return True
         except urllib.error.HTTPError as error:
-            if error.code == 404:
+            if error.code in {404, 410}:
                 return False
             raise
 
     def ensure_dir(self, path: str) -> None:
-        if self.exists(path):
+        if self.exists(path, collection=True):
             return
         try:
-            self._request("MKCOL", path)
+            self._request("MKCOL", path, collection=True)
         except urllib.error.HTTPError as error:
-            if error.code not in {405, 409}:
-                raise
+            if error.code in {405, 409} and self.exists(path, collection=True):
+                return
+            raise
 
     def upload(self, local_path: Path, remote_path: str) -> None:
         self._request("PUT", remote_path, data=local_path.read_bytes(), headers={"Content-Type": "application/pdf"})
@@ -507,10 +508,10 @@ class _WebDavClient:
 
     def list_pdf_files(self, path: str) -> list[str]:
         try:
-            with self._request("PROPFIND", path, headers={"Depth": "1"}) as response:
+            with self._request("PROPFIND", path, headers={"Depth": "1"}, collection=True) as response:
                 data = response.read()
         except urllib.error.HTTPError as error:
-            if error.code == 404:
+            if error.code in {404, 410}:
                 return []
             raise
         names: list[str] = []
@@ -530,8 +531,11 @@ class _WebDavClient:
         path: str,
         data: bytes | None = None,
         headers: dict[str, str] | None = None,
+        collection: bool = False,
     ):
         quoted = "/".join(urllib.parse.quote(part) for part in path.strip("/").split("/") if part)
+        if collection and quoted and not quoted.endswith("/"):
+            quoted += "/"
         url = urllib.parse.urljoin(self.base_url, quoted)
         request = urllib.request.Request(url, data=data, headers=headers or {}, method=method)
         return self._opener.open(request, timeout=30)
