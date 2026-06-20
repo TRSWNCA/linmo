@@ -67,6 +67,7 @@ CREATE TABLE IF NOT EXISTS generated_posts (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL,
     original_pdf_path TEXT NOT NULL DEFAULT '',
+    output_format TEXT NOT NULL DEFAULT 'pdf',
     thumb_path TEXT NOT NULL DEFAULT '',
     page_count INTEGER NOT NULL DEFAULT 0,
     result_count INTEGER NOT NULL DEFAULT 0,
@@ -106,6 +107,7 @@ class Repository:
             conn.executescript(SCHEMA)
             _ensure_column(conn, "copybooks", "cover_path", "TEXT NOT NULL DEFAULT ''")
             _ensure_column(conn, "generated_posts", "thumb_path", "TEXT NOT NULL DEFAULT ''")
+            _ensure_column(conn, "generated_posts", "output_format", "TEXT NOT NULL DEFAULT 'pdf'")
             _ensure_column(conn, "generated_posts", "result_count", "INTEGER NOT NULL DEFAULT 0")
             _ensure_column(conn, "generated_posts", "sync_status", "TEXT NOT NULL DEFAULT 'local'")
             _ensure_column(conn, "generated_posts", "remote_path", "TEXT NOT NULL DEFAULT ''")
@@ -407,6 +409,7 @@ class Repository:
         allowed = [
             "name",
             "original_pdf_path",
+            "output_format",
             "thumb_path",
             "page_count",
             "result_count",

@@ -20,6 +20,7 @@ from .paths import AppPaths
 from .repository import Repository
 
 IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tif", ".tiff"}
+GENERATED_FILE_SUFFIXES = {".pdf", ".png"}
 
 
 class LinmoServices:
@@ -123,18 +124,7 @@ class LinmoServices:
         preset_id: int | None = None,
         output_path: str | None = None,
     ) -> Path:
-        if not queue_item_ids:
-            raise ValueError("queue_item_ids cannot be empty")
-        preset = self.repo.get_preset(preset_id) if preset_id else None
-        images = []
-        for item_id in queue_item_ids:
-            item = self.repo.get_queue_item(int(item_id))
-            page = self.repo.get_page_with_copybook(int(item["page_id"]))
-            params_dict = dict(item["params"])
-            if preset:
-                params_dict = self._apply_preset(params_dict, preset)
-            params = self._params_from_dict(params_dict)
-            images.append(process_image(self.load_page_image(page, dpi=params.dpi), params))
+        images = self._render_queue_images(queue_item_ids, preset_id)
 
         if output_path:
             out_path = Path(output_path).expanduser()
@@ -155,28 +145,42 @@ class LinmoServices:
         queue_item_ids: list[int],
         name: str,
         preset_id: int | None = None,
+        output_format: str = "pdf",
     ) -> dict[str, Any]:
         clean_name = name.strip()
+        clean_format = output_format.strip().lower()
         if not clean_name:
             raise ValueError("generated post name cannot be empty")
         if not queue_item_ids:
             raise ValueError("queue_item_ids cannot be empty")
+        if clean_format not in {"pdf", "png"}:
+            raise ValueError("output_format must be pdf or png")
 
         post = self.repo.create_generated_post(clean_name, len(queue_item_ids))
         post_dir = self._generated_post_dir(int(post["id"]))
         post_dir.mkdir(parents=True, exist_ok=True)
         results_dir = post_dir / "results"
         results_dir.mkdir(parents=True, exist_ok=True)
-        original_pdf = post_dir / "original.pdf"
 
-        self.export_queue_to_pdf(queue_item_ids, preset_id, str(original_pdf))
-        thumb = self._create_generated_post_thumbnail(int(post["id"]), original_pdf)
+        if clean_format == "pdf":
+            original_path = post_dir / "original.pdf"
+            self.export_queue_to_pdf(queue_item_ids, preset_id, str(original_path))
+        else:
+            original_dir = post_dir / "original"
+            original_dir.mkdir(parents=True, exist_ok=True)
+            images = self._render_queue_images(queue_item_ids, preset_id)
+            saved_paths = self._save_png_pages(images, original_dir)
+            original_path = saved_paths[0]
+            self.repo.record_export(original_path, len(saved_paths))
+
+        thumb = self._create_generated_post_thumbnail(int(post["id"]), original_path)
         return self.repo.update_generated_post(
             int(post["id"]),
             {
-                "original_pdf_path": str(original_pdf),
+                "original_pdf_path": str(original_path),
+                "output_format": clean_format,
                 "thumb_path": str(thumb),
-                "result_count": self._count_pdf_results(results_dir),
+                "result_count": self._count_generated_results(results_dir),
                 "sync_status": "local",
             },
         )
@@ -192,21 +196,20 @@ class LinmoServices:
         thumb_path = Path(post["thumb_path"]) if post.get("thumb_path") else None
         if thumb_path and thumb_path.exists():
             return thumb_path
-        original = Path(post["original_pdf_path"]) if post.get("original_pdf_path") else None
-        if not original or not original.exists():
+        originals = self._generated_original_files(post)
+        if not originals:
             return None
-        thumb = self._create_generated_post_thumbnail(post_id, original)
+        thumb = self._create_generated_post_thumbnail(post_id, originals[0])
         self.repo.update_generated_post(post_id, {"thumb_path": str(thumb)})
         return thumb
 
     def list_generated_post_files(self, post_id: int) -> list[dict[str, Any]]:
         post = self.repo.get_generated_post(post_id)
         files = []
-        original = Path(post["original_pdf_path"]) if post.get("original_pdf_path") else None
-        if original and original.exists():
-            files.append({"kind": "original", "name": "original.pdf", "path": str(original), "size": original.stat().st_size})
+        for original in self._generated_original_files(post):
+            files.append({"kind": "original", "name": original.name, "path": str(original), "size": original.stat().st_size})
         results_dir = self._generated_post_dir(post_id) / "results"
-        for path in sorted(results_dir.glob("*.pdf")):
+        for path in self._generated_files_in_dir(results_dir):
             files.append({"kind": "result", "name": path.name, "path": str(path), "size": path.stat().st_size})
         return files
 
@@ -224,26 +227,37 @@ class LinmoServices:
             client.ensure_dir(remote_post_dir)
             client.ensure_dir(remote_results_dir)
 
-            local_original = Path(str(post["original_pdf_path"]))
-            if not local_original.exists():
-                raise ValueError(f"generated PDF does not exist: {local_original}")
-            remote_original = posixpath.join(remote_post_dir, "original.pdf")
-            if client.exists(remote_original):
-                client.download(remote_original, local_original)
+            local_originals = self._generated_original_files(post)
+            if not local_originals:
+                raise ValueError("generated output does not exist")
+            if str(post.get("output_format", "pdf")) == "png":
+                remote_original_dir = posixpath.join(remote_post_dir, "original")
+                client.ensure_dir(remote_original_dir)
+                for local_original in local_originals:
+                    remote_original = posixpath.join(remote_original_dir, local_original.name)
+                    if client.exists(remote_original):
+                        client.download(remote_original, local_original)
+                    else:
+                        client.upload(local_original, remote_original)
             else:
-                client.upload(local_original, remote_original)
+                local_original = local_originals[0]
+                remote_original = posixpath.join(remote_post_dir, "original.pdf")
+                if client.exists(remote_original):
+                    client.download(remote_original, local_original)
+                else:
+                    client.upload(local_original, remote_original)
 
             results_dir = self._generated_post_dir(post_id) / "results"
             results_dir.mkdir(parents=True, exist_ok=True)
-            for name in client.list_pdf_files(remote_results_dir):
+            for name in client.list_generated_files(remote_results_dir):
                 client.download(posixpath.join(remote_results_dir, name), results_dir / name)
 
-            thumb = self._create_generated_post_thumbnail(post_id, local_original)
+            thumb = self._create_generated_post_thumbnail(post_id, local_originals[0])
             return self.repo.update_generated_post(
                 post_id,
                 {
                     "thumb_path": str(thumb),
-                    "result_count": self._count_pdf_results(results_dir),
+                    "result_count": self._count_generated_results(results_dir),
                     "sync_status": "synced",
                     "remote_path": remote_post_dir,
                     "last_synced_at": int(time.time()),
@@ -353,27 +367,66 @@ class LinmoServices:
     def _generated_post_dir(self, post_id: int) -> Path:
         return self.paths.generated_dir / str(post_id)
 
-    def _create_generated_post_thumbnail(self, post_id: int, pdf_path: Path) -> Path:
+    def _render_queue_images(self, queue_item_ids: list[int], preset_id: int | None = None) -> list[Image.Image]:
+        if not queue_item_ids:
+            raise ValueError("queue_item_ids cannot be empty")
+        preset = self.repo.get_preset(preset_id) if preset_id else None
+        images = []
+        for item_id in queue_item_ids:
+            item = self.repo.get_queue_item(int(item_id))
+            page = self.repo.get_page_with_copybook(int(item["page_id"]))
+            params_dict = dict(item["params"])
+            if preset:
+                params_dict = self._apply_preset(params_dict, preset)
+            params = self._params_from_dict(params_dict)
+            images.append(process_image(self.load_page_image(page, dpi=params.dpi), params))
+        return images
+
+    def _save_png_pages(self, images: list[Image.Image], output_dir: Path) -> list[Path]:
+        saved_paths = []
+        for index, image in enumerate(images, start=1):
+            out_path = output_dir / f"{index:03d}.png"
+            image.convert("RGB").save(out_path, "PNG")
+            saved_paths.append(out_path)
+        return saved_paths
+
+    def _generated_original_files(self, post: dict[str, Any]) -> list[Path]:
+        original = Path(post["original_pdf_path"]) if post.get("original_pdf_path") else None
+        if str(post.get("output_format", "pdf")) == "png":
+            original_dir = self._generated_post_dir(int(post["id"])) / "original"
+            return self._generated_files_in_dir(original_dir)
+        if original and original.exists():
+            return [original]
+        return []
+
+    def _generated_files_in_dir(self, directory: Path) -> list[Path]:
+        if not directory.exists():
+            return []
+        return sorted(path for path in directory.iterdir() if path.is_file() and path.suffix.lower() in GENERATED_FILE_SUFFIXES)
+
+    def _create_generated_post_thumbnail(self, post_id: int, source_path: Path) -> Path:
         thumb_path = self.paths.generated_thumbs_dir / f"{post_id}.jpg"
         thumb_path.parent.mkdir(parents=True, exist_ok=True)
-        with fitz.open(pdf_path) as document:
-            if document.page_count == 0:
-                raise ValueError(f"generated PDF has no pages: {pdf_path}")
-            page = document.load_page(0)
-            pixmap = page.get_pixmap(matrix=fitz.Matrix(120 / 72, 120 / 72), alpha=False)
-            image = Image.frombytes("RGB", [pixmap.width, pixmap.height], pixmap.samples)
+        if source_path.suffix.lower() == ".pdf":
+            with fitz.open(source_path) as document:
+                if document.page_count == 0:
+                    raise ValueError(f"generated PDF has no pages: {source_path}")
+                page = document.load_page(0)
+                pixmap = page.get_pixmap(matrix=fitz.Matrix(120 / 72, 120 / 72), alpha=False)
+                image = Image.frombytes("RGB", [pixmap.width, pixmap.height], pixmap.samples)
+        else:
+            image = Image.open(source_path).convert("RGB")
         image.thumbnail((260, 360))
         image.convert("RGB").save(thumb_path, "JPEG", quality=85)
+        image.close()
         return thumb_path
 
-    def _count_pdf_results(self, results_dir: Path) -> int:
-        if not results_dir.exists():
-            return 0
-        return len([path for path in results_dir.glob("*.pdf") if path.is_file()])
+    def _count_generated_results(self, results_dir: Path) -> int:
+        return len(self._generated_files_in_dir(results_dir))
 
     def _refresh_generated_post_file_counts(self, post: dict[str, Any]) -> dict[str, Any]:
         results_dir = self._generated_post_dir(int(post["id"])) / "results"
-        count = self._count_pdf_results(results_dir)
+        count = self._count_generated_results(results_dir)
         if int(post.get("result_count") or 0) != count:
             post = self.repo.update_generated_post(int(post["id"]), {"result_count": count})
         return post
@@ -499,14 +552,15 @@ class _WebDavClient:
             raise
 
     def upload(self, local_path: Path, remote_path: str) -> None:
-        self._request("PUT", remote_path, data=local_path.read_bytes(), headers={"Content-Type": "application/pdf"})
+        content_type = "image/png" if local_path.suffix.lower() == ".png" else "application/pdf"
+        self._request("PUT", remote_path, data=local_path.read_bytes(), headers={"Content-Type": content_type})
 
     def download(self, remote_path: str, local_path: Path) -> None:
         local_path.parent.mkdir(parents=True, exist_ok=True)
         with self._request("GET", remote_path) as response:
             local_path.write_bytes(response.read())
 
-    def list_pdf_files(self, path: str) -> list[str]:
+    def list_generated_files(self, path: str) -> list[str]:
         try:
             with self._request("PROPFIND", path, headers={"Depth": "1"}, collection=True) as response:
                 data = response.read()
@@ -521,7 +575,7 @@ class _WebDavClient:
             if not href:
                 continue
             name = urllib.parse.unquote(href.rstrip("/").split("/")[-1])
-            if name.lower().endswith(".pdf"):
+            if Path(name).suffix.lower() in GENERATED_FILE_SUFFIXES:
                 names.append(name)
         return sorted(set(names))
 

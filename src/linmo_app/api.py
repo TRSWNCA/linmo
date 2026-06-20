@@ -89,9 +89,10 @@ class LinmoApi:
         preset_id: int | None = None,
         output_path: str | None = None,
         name: str | None = None,
+        output_format: str = "pdf",
     ) -> dict[str, Any]:
         if name is not None:
-            post = self.services.export_queue_to_generated_post(queue_item_ids, name, preset_id)
+            post = self.services.export_queue_to_generated_post(queue_item_ids, name, preset_id, output_format)
             return {"output_path": post["original_pdf_path"], "page_count": len(queue_item_ids), "generated_post": post}
         path = self.services.export_queue_to_pdf(queue_item_ids, preset_id, output_path)
         return {"output_path": str(path), "page_count": len(queue_item_ids)}

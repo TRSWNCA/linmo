@@ -41,6 +41,7 @@ export type GeneratedPost = {
   id: number;
   name: string;
   original_pdf_path: string;
+  output_format: string;
   thumb_path: string;
   page_count: number;
   result_count: number;
@@ -71,7 +72,7 @@ export type Api = {
   list_queue_items(): Promise<QueueItem[]>;
   update_queue_item(item_id: number, params: Record<string, unknown>): Promise<QueueItem>;
   render_queue_preview(item_id: number): Promise<string>;
-  export_queue_to_pdf(queue_item_ids: number[], preset_id?: number | null, output_path?: string | null, name?: string | null): Promise<{ output_path: string; page_count: number; generated_post?: GeneratedPost }>;
+  export_queue_to_pdf(queue_item_ids: number[], preset_id?: number | null, output_path?: string | null, name?: string | null, output_format?: string | null): Promise<{ output_path: string; page_count: number; generated_post?: GeneratedPost }>;
   get_next_generated_post_name(): Promise<string>;
   list_generated_posts(): Promise<GeneratedPost[]>;
   get_generated_post_thumbnail(post_id: number): Promise<string>;

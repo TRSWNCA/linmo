@@ -89,7 +89,7 @@ const fallbackApi: Api = {
   async render_queue_preview() {
     return "";
   },
-  async export_queue_to_pdf(queue_item_ids, _presetId, _outputPath, name) {
+  async export_queue_to_pdf(queue_item_ids, _presetId, _outputPath, name, outputFormat) {
     return {
       output_path: "",
       page_count: queue_item_ids.length,
@@ -97,6 +97,7 @@ const fallbackApi: Api = {
         id: Date.now(),
         name,
         original_pdf_path: "",
+        output_format: outputFormat || "pdf",
         thumb_path: "",
         page_count: queue_item_ids.length,
         result_count: 0,
@@ -125,6 +126,7 @@ const fallbackApi: Api = {
       id: post_id,
       name: "",
       original_pdf_path: "",
+      output_format: "pdf",
       thumb_path: "",
       page_count: 0,
       result_count: 0,
@@ -654,6 +656,7 @@ function Maker({
   const [previewing, setPreviewing] = useState(false);
   const [exportDialogOpen, setExportDialogOpen] = useState(false);
   const [exportName, setExportName] = useState("");
+  const [exportFormat, setExportFormat] = useState<"pdf" | "png">("pdf");
   const [exporting, setExporting] = useState(false);
   const [draggingId, setDraggingId] = useState<number | null>(null);
   const previewRunId = useRef(0);
@@ -690,6 +693,7 @@ function Maker({
   async function openExportDialog() {
     const defaultName = await api().get_next_generated_post_name();
     setExportName(defaultName);
+    setExportFormat("pdf");
     setExportDialogOpen(true);
   }
 
@@ -701,10 +705,10 @@ function Maker({
     }
     setExporting(true);
     try {
-      const result = await api().export_queue_to_pdf(items.map((item) => item.id), null, null, name);
+      const result = await api().export_queue_to_pdf(items.map((item) => item.id), null, null, name, exportFormat);
       await refreshStats();
       setExportDialogOpen(false);
-      setMessage(`已保存 ${result.page_count} 页到练帖阁：${name}`);
+      setMessage(`已保存 ${result.page_count} 页 ${exportFormat.toUpperCase()} 到练帖阁：${name}`);
       openPractice();
     } catch (error) {
       setMessage(String(error));
@@ -783,7 +787,7 @@ function Maker({
       <div className="makeTopbar">
         {active ? <ParamToolbar item={active} update={updateActive} /> : <div className="paramToolbarPlaceholder" />}
         <Checkbox checked={comparePreview} onChange={(_, data) => setComparePreview(Boolean(data.checked))} label="对照预览" />
-        <Button appearance="primary" icon={<DocumentPdf24Regular />} disabled={!items.length} onClick={openExportDialog}>导出 PDF</Button>
+        <Button appearance="primary" icon={<DocumentPdf24Regular />} disabled={!items.length} onClick={openExportDialog}>导出</Button>
       </div>
 
       <div className={comparePreview ? "makeStage compare" : "makeStage single"}>
@@ -835,7 +839,9 @@ function Maker({
         open={exportDialogOpen}
         name={exportName}
         saving={exporting}
+        outputFormat={exportFormat}
         onNameChange={setExportName}
+        onFormatChange={setExportFormat}
         onCancel={() => setExportDialogOpen(false)}
         onSave={exportPdf}
       />
@@ -847,14 +853,18 @@ function ExportPostDialog({
   open,
   name,
   saving,
+  outputFormat,
   onNameChange,
+  onFormatChange,
   onCancel,
   onSave,
 }: {
   open: boolean;
   name: string;
   saving: boolean;
+  outputFormat: "pdf" | "png";
   onNameChange: (value: string) => void;
+  onFormatChange: (value: "pdf" | "png") => void;
   onCancel: () => void;
   onSave: () => Promise<void>;
 }) {
@@ -865,9 +875,17 @@ function ExportPostDialog({
         <DialogBody>
           <DialogTitle>保存生成帖</DialogTitle>
           <DialogContent>
-            <Field label="名称">
-              <Input value={name} onChange={(_, data) => onNameChange(data.value)} autoFocus />
-            </Field>
+            <div className="formStack">
+              <Field label="名称">
+                <Input value={name} onChange={(_, data) => onNameChange(data.value)} autoFocus />
+              </Field>
+              <Field label="格式">
+                <Select value={outputFormat} onChange={(event) => onFormatChange(event.target.value === "png" ? "png" : "pdf")}>
+                  <Option value="pdf">PDF</Option>
+                  <Option value="png">PNG</Option>
+                </Select>
+              </Field>
+            </div>
           </DialogContent>
           <DialogActions>
             <Button appearance="secondary" disabled={saving} onClick={onCancel}>取消</Button>
@@ -1058,7 +1076,7 @@ function PracticeShelf({ setMessage }: { setMessage: (value: string) => void }) 
           <div className="generatedFileList">
             {files.map((file) => (
               <div className="generatedFileRow" key={`${file.kind}-${file.path}`}>
-                <DocumentPdf24Regular />
+                  {file.name.toLowerCase().endsWith(".png") ? <Image24Regular /> : <DocumentPdf24Regular />}
                 <div>
                   <Text weight="semibold">{file.kind === "original" ? "原帖" : "练习结果"} · {file.name}</Text>
                   <Text size={200} className="mutedText" truncate>{file.path}</Text>
@@ -1110,7 +1128,7 @@ function PracticeShelf({ setMessage }: { setMessage: (value: string) => void }) 
               </Tooltip>
             </div>
             <Text weight="semibold" truncate>{post.name}</Text>
-            <Text size={200} className="mutedText" truncate>{post.page_count} 页 · 结果 {post.result_count} 份 · {syncStatusText(post.sync_status)}</Text>
+            <Text size={200} className="mutedText" truncate>{post.output_format.toUpperCase()} · {post.page_count} 页 · 结果 {post.result_count} 份 · {syncStatusText(post.sync_status)}</Text>
           </div>
         ))}
       </div>

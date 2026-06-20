@@ -77,6 +77,33 @@ class AppServicesTests(unittest.TestCase):
             self.assertEqual(files[0]["name"], "original.pdf")
             self.assertEqual(services.repo.stats()["exported_pages"], 1)
 
+    def test_generated_post_can_export_png_pages(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            image_dir = root / "pages"
+            image_dir.mkdir()
+            _make_ruled_image(image_dir / "1.png")
+            _make_ruled_image(image_dir / "2.png")
+            services = LinmoServices(AppPaths(root / "data"))
+
+            imported = services.import_copybooks([str(image_dir)])
+            pages = services.repo.list_pages(imported[0]["id"])
+            queue_items = [
+                services.repo.add_queue_item(page["id"], {"mode": "row", "blank_ratio": 0.5, "ink_color": "#000000"})
+                for page in pages
+            ]
+
+            post = services.export_queue_to_generated_post([item["id"] for item in queue_items], "卷一", output_format="png")
+
+            self.assertEqual(post["output_format"], "png")
+            self.assertEqual(post["page_count"], 2)
+            self.assertTrue(Path(post["original_pdf_path"]).exists())
+            self.assertEqual(Path(post["original_pdf_path"]).suffix, ".png")
+            files = services.list_generated_post_files(post["id"])
+            self.assertEqual([file["name"] for file in files], ["001.png", "002.png"])
+            self.assertTrue(Path(post["thumb_path"]).exists())
+            self.assertEqual(services.repo.stats()["exported_pages"], 2)
+
     def test_api_start_clears_previous_queue_items(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
