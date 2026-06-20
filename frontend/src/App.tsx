@@ -17,7 +17,6 @@ import {
   Input,
   MessageBar,
   MessageBarBody,
-  Option,
   Select,
   Spinner,
   Text,
@@ -881,8 +880,8 @@ function ExportPostDialog({
               </Field>
               <Field label="格式">
                 <Select value={outputFormat} onChange={(event) => onFormatChange(event.target.value === "png" ? "png" : "pdf")}>
-                  <Option value="pdf">PDF</Option>
-                  <Option value="png">PNG</Option>
+                  <option value="pdf">PDF</option>
+                  <option value="png">PNG</option>
                 </Select>
               </Field>
             </div>
@@ -982,14 +981,14 @@ function ParamToolbar({ item, update }: { item: QueueItem; update: (params: Reco
     <div className="paramToolbar">
       <Field label="模式" size="small">
         <Select size="small" value={String(params.mode || "row")} onChange={(event) => update({ mode: event.target.value })}>
-          <Option value="row">横向行</Option>
-          <Option value="col">竖向列</Option>
+          <option value="row">横向行</option>
+          <option value="col">竖向列</option>
         </Select>
       </Field>
       <Field label="检测" size="small">
         <Select size="small" value={String(params.column_detection || "gray")} onChange={(event) => update({ column_detection: event.target.value })}>
-          <Option value="gray">灰底</Option>
-          <Option value="ink">墨迹</Option>
+          <option value="gray">灰底</option>
+          <option value="ink">墨迹</option>
         </Select>
       </Field>
       <Field label="空白" size="small"><Input size="small" type="number" step="0.1" value={String(Number(params.blank_ratio || 1))} onChange={(_, data) => update({ blank_ratio: Number(data.value) })} /></Field>
@@ -1198,14 +1197,14 @@ function Presets({ setMessage }: { setMessage: (value: string) => void }) {
           <Field label="前景阈值"><Input type="number" value={String(form.foreground_threshold)} onChange={(_, data) => setForm({ ...form, foreground_threshold: Number(data.value) })} /></Field>
           <Field label="模式">
             <Select value={form.mode} onChange={(event) => setForm({ ...form, mode: event.target.value })}>
-              <Option value="row">横向行</Option>
-              <Option value="col">竖向列</Option>
+              <option value="row">横向行</option>
+              <option value="col">竖向列</option>
             </Select>
           </Field>
           <Field label="列检测">
             <Select value={form.column_detection} onChange={(event) => setForm({ ...form, column_detection: event.target.value })}>
-              <Option value="gray">灰底栏</Option>
-              <Option value="ink">墨迹列</Option>
+              <option value="gray">灰底栏</option>
+              <option value="ink">墨迹列</option>
             </Select>
           </Field>
         </div>
