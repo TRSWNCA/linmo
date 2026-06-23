@@ -152,10 +152,10 @@ const fallbackApi: Api = {
     return [];
   },
   async create_preset(data) {
-    return { id: Date.now(), name: data.name, background_image: "", ink_color: "#000000", foreground_threshold: 18, mode: "row", column_detection: "gray", params: {} };
+    return { id: Date.now(), name: data.name, background_image: "", ink_color: "#000000", foreground_threshold: 18, mode: "row", column_detection: "gray", params: asParams(data.params) };
   },
   async update_preset(preset_id, data) {
-    return { id: preset_id, name: data.name || "", background_image: data.background_image || "", ink_color: data.ink_color || "#000000", foreground_threshold: data.foreground_threshold || 18, mode: data.mode || "row", column_detection: data.column_detection || "gray", params: data.params || {} };
+    return { id: preset_id, name: data.name || "", background_image: data.background_image || "", ink_color: data.ink_color || "#000000", foreground_threshold: data.foreground_threshold || 18, mode: data.mode || "row", column_detection: data.column_detection || "gray", params: asParams(data.params) };
   },
   async delete_preset() {
     return { ok: true };
@@ -182,6 +182,13 @@ const fallbackApi: Api = {
   async window_toggle_maximize() {},
   async window_close() {},
 };
+
+function asParams(value: unknown): Record<string, unknown> {
+  if (value && typeof value === "object" && !Array.isArray(value)) {
+    return value as Record<string, unknown>;
+  }
+  return {};
+}
 
 function api(): Api {
   return window.pywebview?.api || fallbackApi;
@@ -216,9 +223,9 @@ export function App() {
             <Text weight="semibold">Linmo</Text>
           </div>
           <NavButton icon={<Home24Regular />} active={view === "home"} onClick={() => setView("home")}>首页</NavButton>
-          <NavButton icon={<BookOpen24Regular />} active={view === "library"} onClick={() => setView("library")}>藏帖阁</NavButton>
-          <NavButton icon={<DocumentPdf24Regular />} active={view === "make"} onClick={() => setView("make")}>生成帖</NavButton>
-          <NavButton icon={<DocumentFolder24Regular />} active={view === "practice"} onClick={() => setView("practice")}>练帖阁</NavButton>
+          <NavButton icon={<BookOpen24Regular />} active={view === "library"} onClick={() => setView("library")}>藏帖</NavButton>
+          <NavButton icon={<DocumentPdf24Regular />} active={view === "make"} onClick={() => setView("make")}>制帖</NavButton>
+          <NavButton icon={<DocumentFolder24Regular />} active={view === "practice"} onClick={() => setView("practice")}>练帖</NavButton>
           <NavButton icon={<Color24Regular />} active={view === "presets"} onClick={() => setView("presets")}>预设</NavButton>
           <div className="navSpacer" />
           <NavButton icon={<Settings24Regular />} active={view === "settings"} onClick={() => setView("settings")}>设置</NavButton>
@@ -1006,6 +1013,12 @@ function ParamToolbar({ item, update }: { item: QueueItem; update: (params: Reco
       <Field label="空白" size="small"><Input size="small" type="number" step="0.1" value={String(Number(params.blank_ratio || 1))} onChange={(_, data) => update({ blank_ratio: Number(data.value) })} /></Field>
       <Field label="字色" size="small"><input className="colorPicker" type="color" value={inkColor} onChange={(event) => update({ ink_color: event.target.value })} /></Field>
       <Field label="阈值" size="small"><Input size="small" type="number" value={String(Number(params.foreground_threshold || 18))} onChange={(_, data) => update({ foreground_threshold: Number(data.value) })} /></Field>
+      <Field label="前景" size="small">
+        <Select size="small" value={String(params.foreground_method || "adaptive")} onChange={(event) => update({ foreground_method: event.target.value })}>
+          <option value="adaptive">鲁棒</option>
+          <option value="global">旧版</option>
+        </Select>
+      </Field>
       <Field label="列" size="small"><Input size="small" type="number" placeholder="自动" value={params.columns ? String(params.columns) : ""} onChange={(_, data) => update({ columns: data.value ? Number(data.value) : "" })} /></Field>
       <Field label="行" size="small"><Input size="small" type="number" placeholder="自动" value={params.rows ? String(params.rows) : ""} onChange={(_, data) => update({ rows: data.value ? Number(data.value) : "" })} /></Field>
       <Field label="背景" size="small"><Input size="small" value={String(params.background_image || "")} onChange={(_, data) => update({ background_image: data.value })} /></Field>
@@ -1162,7 +1175,7 @@ function formatFileSize(size: number) {
 
 function Presets({ setMessage }: { setMessage: (value: string) => void }) {
   const [presets, setPresets] = useState<Preset[]>([]);
-  const [form, setForm] = useState({ name: "", background_image: "", ink_color: "#000000", foreground_threshold: 18, mode: "row", column_detection: "gray" });
+  const [form, setForm] = useState({ name: "", background_image: "", ink_color: "#000000", foreground_threshold: 18, foreground_method: "adaptive", mode: "row", column_detection: "gray" });
 
   async function load() {
     setPresets(await api().list_presets());
@@ -1178,7 +1191,7 @@ function Presets({ setMessage }: { setMessage: (value: string) => void }) {
       setMessage("预设需要名称");
       return;
     }
-    await api().create_preset(form);
+    await api().create_preset({ ...form, params: { foreground_method: form.foreground_method } });
     setForm({ ...form, name: "" });
     await load();
   }
@@ -1207,6 +1220,12 @@ function Presets({ setMessage }: { setMessage: (value: string) => void }) {
           </div>
           <Field label="字色"><Input value={form.ink_color} onChange={(_, data) => setForm({ ...form, ink_color: data.value })} /></Field>
           <Field label="前景阈值"><Input type="number" value={String(form.foreground_threshold)} onChange={(_, data) => setForm({ ...form, foreground_threshold: Number(data.value) })} /></Field>
+          <Field label="前景策略">
+            <Select value={form.foreground_method} onChange={(event) => setForm({ ...form, foreground_method: event.target.value })}>
+              <option value="adaptive">鲁棒</option>
+              <option value="global">旧版</option>
+            </Select>
+          </Field>
           <Field label="模式">
             <Select value={form.mode} onChange={(event) => setForm({ ...form, mode: event.target.value })}>
               <option value="row">横向行</option>
@@ -1225,7 +1244,7 @@ function Presets({ setMessage }: { setMessage: (value: string) => void }) {
         {presets.map((preset) => (
           <Card key={preset.id} className="presetCard">
             <CardHeader header={<Text weight="semibold">{preset.name}</Text>} description={<Text size={200}>{preset.mode} · {preset.column_detection}</Text>} />
-            <Text size={200}>{preset.ink_color} · 阈值 {preset.foreground_threshold}</Text>
+            <Text size={200}>{preset.ink_color} · 阈值 {preset.foreground_threshold} · {String(preset.params?.foreground_method || "adaptive")}</Text>
           </Card>
         ))}
       </div>

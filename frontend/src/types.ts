@@ -79,7 +79,7 @@ export type Api = {
   list_generated_post_files(post_id: number): Promise<GeneratedPostFile[]>;
   sync_generated_post(post_id: number): Promise<GeneratedPost>;
   list_presets(): Promise<Preset[]>;
-  create_preset(data: Partial<Preset> & { name: string }): Promise<Preset>;
+  create_preset(data: Record<string, unknown> & { name: string }): Promise<Preset>;
   update_preset(preset_id: number, data: Partial<Preset>): Promise<Preset>;
   delete_preset(preset_id: number): Promise<{ ok: boolean }>;
   get_settings(): Promise<Record<string, string>>;

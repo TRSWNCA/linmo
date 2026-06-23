@@ -5,7 +5,7 @@ from pathlib import Path
 
 import fitz
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageFilter
 
 
 @dataclass(frozen=True)
@@ -243,6 +243,7 @@ def compose_column_practice_page(
     extract_foreground: bool = False,
     ink_color: tuple[int, int, int] = (30, 30, 30),
     foreground_threshold: int = 28,
+    foreground_method: str = "adaptive",
 ) -> Image.Image:
     """Insert a blank practice strip to the physical right of each detected column."""
     if blank_ratio <= 0:
@@ -261,7 +262,16 @@ def compose_column_practice_page(
 
     output = _make_background((total_width, output_height), background, blank_color)
     for original, x, y in placements:
-        _paste_original(output, original, x, y, extract_foreground, ink_color, foreground_threshold)
+        _paste_original(
+            output,
+            original,
+            x,
+            y,
+            extract_foreground,
+            ink_color,
+            foreground_threshold,
+            foreground_method,
+        )
     return output
 
 
@@ -275,6 +285,7 @@ def compose_row_practice_page(
     extract_foreground: bool = False,
     ink_color: tuple[int, int, int] = (30, 30, 30),
     foreground_threshold: int = 28,
+    foreground_method: str = "adaptive",
 ) -> Image.Image:
     """Insert a blank practice strip below each detected horizontal row."""
     if blank_ratio <= 0:
@@ -293,7 +304,16 @@ def compose_row_practice_page(
 
     output = _make_background((output_width, total_height), background, blank_color)
     for original, x, y in placements:
-        _paste_original(output, original, x, y, extract_foreground, ink_color, foreground_threshold)
+        _paste_original(
+            output,
+            original,
+            x,
+            y,
+            extract_foreground,
+            ink_color,
+            foreground_threshold,
+            foreground_method,
+        )
     return output
 
 
@@ -423,8 +443,6 @@ def _split_gray_columns_by_bright_separators(
     min_width: int,
 ) -> list[ColumnBounds]:
     split_columns: list[ColumnBounds] = []
-    separator_threshold = 200
-    separator_coverage_ratio = 0.25
 
     for column in columns:
         crop = gray[top : bottom + 1, column.left : column.right + 1]
@@ -432,10 +450,7 @@ def _split_gray_columns_by_bright_separators(
             split_columns.append(column)
             continue
 
-        bright = crop >= separator_threshold
-        min_separator_pixels = max(1, int(crop.shape[0] * separator_coverage_ratio))
-        separator_x = np.flatnonzero(bright.sum(axis=0) >= min_separator_pixels)
-        separator_runs = _contiguous_runs(separator_x)
+        separator_runs = _detect_bright_separator_runs(crop)
         if len(separator_runs) < 2:
             split_columns.append(column)
             continue
@@ -450,6 +465,140 @@ def _split_gray_columns_by_bright_separators(
         split_columns.extend(local_slots or [column])
 
     return split_columns
+
+
+def _detect_bright_separator_runs(crop: np.ndarray) -> list[tuple[int, int]]:
+    local_background = int(np.percentile(crop, 50))
+    bright_threshold = min(245, local_background + 20)
+    bright = crop >= bright_threshold
+
+    width = crop.shape[1]
+    tolerances = [max(2, int(width * 0.0025)), max(2, int(width * 0.006))]
+    candidates: list[list[tuple[int, int]]] = []
+    for tolerance in sorted(set(tolerances)):
+        expanded = _horizontal_max_filter(bright, tolerance)
+        for coverage in (0.55, 0.50, 0.45, 0.40):
+            candidates.append(_separator_runs_for_coverage(expanded, coverage))
+
+    regular = _best_regular_separator_runs(candidates, width)
+    if regular:
+        return regular
+
+    strict_runs = candidates[0] if candidates else []
+    relaxed_runs = candidates[2] if len(candidates) > 2 else strict_runs
+    if _separator_runs_are_regular(relaxed_runs):
+        return relaxed_runs
+    return strict_runs
+
+
+def _separator_runs_for_coverage(mask: np.ndarray, coverage_ratio: float) -> list[tuple[int, int]]:
+    min_separator_pixels = max(1, int(mask.shape[0] * coverage_ratio))
+    separator_x = np.flatnonzero(mask.sum(axis=0) >= min_separator_pixels)
+    return _contiguous_runs(separator_x)
+
+
+def _separator_runs_are_regular(runs: list[tuple[int, int]]) -> bool:
+    if len(runs) < 4:
+        return False
+
+    centers = np.asarray([(start + end) / 2 for start, end in runs], dtype=float)
+    gaps = np.diff(centers)
+    median_gap = float(np.median(gaps))
+    if median_gap <= 0:
+        return False
+
+    return bool(np.all(np.abs(gaps - median_gap) <= median_gap * 0.18))
+
+
+def _best_regular_separator_runs(
+    candidates: list[list[tuple[int, int]]],
+    crop_width: int,
+) -> list[tuple[int, int]]:
+    best_runs: list[tuple[int, int]] = []
+    best_score = float("-inf")
+
+    for runs in candidates:
+        if len(runs) < 4:
+            continue
+        centers = np.asarray([(start + end) / 2 for start, end in runs], dtype=float)
+        for first_index in range(len(runs) - 3):
+            for last_index in range(first_index + 3, len(runs)):
+                span = centers[last_index] - centers[first_index]
+                if span < crop_width * 0.45:
+                    continue
+                max_count = min(12, last_index - first_index + 1)
+                for count in range(max_count, 3, -1):
+                    gap = span / (count - 1)
+                    if not crop_width * 0.07 <= gap <= crop_width * 0.30:
+                        continue
+
+                    matched = _match_regular_separator_sequence(
+                        runs,
+                        centers,
+                        first_index,
+                        last_index,
+                        count,
+                        gap,
+                    )
+                    if matched is None:
+                        continue
+
+                    matched_runs, average_error = matched
+                    coverage = (
+                        ((matched_runs[-1][0] + matched_runs[-1][1]) / 2)
+                        - ((matched_runs[0][0] + matched_runs[0][1]) / 2)
+                    ) / max(1, crop_width)
+                    score = count * 100 + coverage * 20 - average_error / max(1, gap)
+                    if score > best_score:
+                        best_score = score
+                        best_runs = matched_runs
+
+    return best_runs
+
+
+def _match_regular_separator_sequence(
+    runs: list[tuple[int, int]],
+    centers: np.ndarray,
+    first_index: int,
+    last_index: int,
+    count: int,
+    gap: float,
+) -> tuple[list[tuple[int, int]], float] | None:
+    tolerance = max(4.0, gap * 0.10)
+    expected_start = centers[first_index]
+    matched_indices: list[int] = []
+    total_error = 0.0
+    search_start = first_index
+
+    for step in range(count):
+        expected = expected_start + gap * step
+        search_end = last_index + 1
+        distances = np.abs(centers[search_start:search_end] - expected)
+        if distances.size == 0:
+            return None
+
+        relative_index = int(distances.argmin())
+        error = float(distances[relative_index])
+        if error > tolerance:
+            return None
+
+        matched_index = search_start + relative_index
+        matched_indices.append(matched_index)
+        total_error += error
+        search_start = matched_index + 1
+
+    return [runs[index] for index in matched_indices], total_error / count
+
+
+def _horizontal_max_filter(mask: np.ndarray, radius: int) -> np.ndarray:
+    if radius <= 0:
+        return mask
+
+    padded = np.pad(mask, ((0, 0), (radius, radius)), constant_values=False)
+    output = np.zeros_like(mask, dtype=bool)
+    for offset in range(radius * 2 + 1):
+        output |= padded[:, offset : offset + mask.shape[1]]
+    return output
 
 
 def _detect_red_column_grid(image: Image.Image) -> tuple[list[ColumnBounds], int, int] | None:
@@ -500,17 +649,32 @@ def _paste_original(
     extract_foreground: bool,
     ink_color: tuple[int, int, int],
     foreground_threshold: int,
+    foreground_method: str,
 ) -> None:
     if not extract_foreground:
         output.paste(original, (x, y))
         return
 
-    alpha = _extract_foreground_alpha(original, foreground_threshold)
+    alpha = _extract_foreground_alpha(original, foreground_threshold, foreground_method)
     ink = Image.new("RGB", original.size, ink_color)
     output.paste(ink, (x, y), alpha)
 
 
-def _extract_foreground_alpha(image: Image.Image, threshold: int) -> Image.Image:
+def _extract_foreground_alpha(
+    image: Image.Image,
+    threshold: int,
+    method: str = "adaptive",
+) -> Image.Image:
+    if threshold < 0:
+        raise ValueError("foreground_threshold must be >= 0")
+    if method == "adaptive":
+        return _extract_adaptive_foreground_alpha(image, threshold)
+    if method == "global":
+        return _extract_global_foreground_alpha(image, threshold)
+    raise ValueError("foreground_method must be 'adaptive' or 'global'")
+
+
+def _extract_global_foreground_alpha(image: Image.Image, threshold: int) -> Image.Image:
     if threshold < 0:
         raise ValueError("foreground_threshold must be >= 0")
 
@@ -531,6 +695,43 @@ def _extract_foreground_alpha(image: Image.Image, threshold: int) -> Image.Image
 
     alpha = np.where(distance > threshold, 255, 0).astype(np.uint8)
     return Image.fromarray(alpha, mode="L")
+
+
+def _extract_adaptive_foreground_alpha(image: Image.Image, threshold: int) -> Image.Image:
+    if threshold < 0:
+        raise ValueError("foreground_threshold must be >= 0")
+
+    source = image.convert("RGB")
+    width, height = source.size
+    window = _foreground_background_window(width, height)
+
+    local_rgb = source.filter(ImageFilter.MedianFilter(size=window))
+    rgb = np.asarray(source, dtype=np.int16)
+    background_rgb = np.asarray(local_rgb, dtype=np.int16)
+    channel_distance = np.abs(rgb - background_rgb).max(axis=2)
+
+    gray = np.asarray(source.convert("L"), dtype=np.int16)
+    background_gray = np.asarray(local_rgb.convert("L"), dtype=np.int16)
+    gray_distance = np.abs(gray - background_gray)
+    distance = np.maximum(channel_distance, gray_distance)
+
+    if threshold == 0:
+        alpha = np.where(distance > 0, 255, 0).astype(np.uint8)
+    else:
+        scale = max(1, threshold)
+        alpha_distance = distance.astype(np.int32) - threshold
+        alpha = np.clip(alpha_distance * 255 // scale, 0, 255).astype(np.uint8)
+
+    alpha_image = Image.fromarray(alpha, mode="L")
+    return alpha_image.filter(ImageFilter.MaxFilter(3)).filter(ImageFilter.MinFilter(3))
+
+
+def _foreground_background_window(width: int, height: int) -> int:
+    short_side = max(1, min(width, height))
+    size = max(9, min(61, int(short_side * 0.08)))
+    if size % 2 == 0:
+        size += 1
+    return size
 
 
 def _detect_horizontal_rule_span(

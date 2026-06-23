@@ -33,6 +33,7 @@ class ProcessingParams:
     extract_foreground: bool = False
     ink_color: str = "#000000"
     foreground_threshold: int = 18
+    foreground_method: str = "adaptive"
 
 
 def load_input_page(input_path: Path, page_number: int, dpi: int) -> Image.Image:
@@ -72,6 +73,7 @@ def process_image(image: Image.Image, params: ProcessingParams) -> Image.Image:
                 extract_foreground=extract_foreground,
                 ink_color=ink_color,
                 foreground_threshold=params.foreground_threshold,
+                foreground_method=params.foreground_method,
             )
 
         if params.mode == "row":
@@ -85,6 +87,7 @@ def process_image(image: Image.Image, params: ProcessingParams) -> Image.Image:
                 extract_foreground=extract_foreground,
                 ink_color=ink_color,
                 foreground_threshold=params.foreground_threshold,
+                foreground_method=params.foreground_method,
             )
     finally:
         if background is not None:

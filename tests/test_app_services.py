@@ -42,6 +42,12 @@ class AppServicesTests(unittest.TestCase):
             queue_item = services.repo.add_queue_item(pages[0]["id"], params)
             preview = services.render_queue_preview(queue_item["id"])
             self.assertTrue(preview.exists())
+            self.assertIn(f"queue-{queue_item['id']}-", preview.name)
+
+            updated = services.repo.update_queue_item(queue_item["id"], {"blank_ratio": 0.75})
+            updated_preview = services.render_queue_preview(updated["id"])
+            self.assertTrue(updated_preview.exists())
+            self.assertNotEqual(preview, updated_preview)
 
             output = services.export_queue_to_pdf([queue_item["id"]])
             self.assertTrue(output.exists())

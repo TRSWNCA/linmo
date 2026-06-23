@@ -6,7 +6,7 @@ from pathlib import Path
 import numpy as np
 from PIL import Image, ImageStat
 
-from linmo.cli import main as cli_main
+from linmo.cli import build_parser, main as cli_main
 from linmo.image_pipeline import detect_gray_columns, detect_ink_columns, detect_ruled_rows
 
 
@@ -15,6 +15,21 @@ OUTPUT_DIR = Path(__file__).parent.parent / "outputs" / "test_cli_resources"
 
 
 class CliResourcesTests(unittest.TestCase):
+    def test_cli_accepts_foreground_method(self) -> None:
+        args = build_parser().parse_args(
+            [
+                "input.png",
+                "--pages",
+                "1",
+                "--foreground-method",
+                "global",
+                "--out",
+                "output.png",
+            ]
+        )
+
+        self.assertEqual(args.foreground_method, "global")
+
     def test_cli_generates_practice_pages_for_resource_directory(self) -> None:
         resource_paths = sorted(RESOURCE_DIR.glob("*.png"))
         self.assertGreater(resource_paths, [], "expected at least one PNG resource")
