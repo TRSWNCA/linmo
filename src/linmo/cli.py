@@ -49,6 +49,12 @@ def build_parser() -> argparse.ArgumentParser:
         default=18,
         help="Minimum grayscale distance from the estimated background for foreground extraction.",
     )
+    parser.add_argument(
+        "--foreground-method",
+        choices=["adaptive", "global"],
+        default="adaptive",
+        help="Foreground extraction strategy. adaptive uses local contrast; global keeps the legacy median threshold.",
+    )
     return parser
 
 
@@ -74,6 +80,7 @@ def main(argv: list[str] | None = None) -> None:
             extract_foreground=args.extract_foreground,
             ink_color=args.ink_color,
             foreground_threshold=args.foreground_threshold,
+            foreground_method=args.foreground_method,
         )
 
         for page_number in pages:

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import base64
+import hashlib
+import json
 import posixpath
 import shutil
 import time
@@ -33,6 +35,7 @@ IPAD_DEVICE_PRESETS: dict[str, tuple[str, int, int]] = {
     "ipad_pro_13_m4": ("iPad Pro 13-inch M4 and later", 2752, 2064),
 }
 DEFAULT_TARGET_DEVICE_PRESET = "ipad_109_air"
+QUEUE_PREVIEW_CACHE_VERSION = "gray-split-v2"
 
 
 class LinmoServices:
@@ -126,7 +129,8 @@ class LinmoServices:
         source = self.load_page_image(page, dpi=params.dpi)
         output = process_image(source, params)
         output.thumbnail((1200, 1200))
-        out_path = self.paths.previews_dir / f"queue-{item_id}.jpg"
+        cache_key = _queue_preview_cache_key(item, page)
+        out_path = self.paths.previews_dir / f"queue-{item_id}-{cache_key}.jpg"
         out_path.parent.mkdir(parents=True, exist_ok=True)
         output.convert("RGB").save(out_path, "JPEG", quality=88)
         return out_path
@@ -479,6 +483,7 @@ class LinmoServices:
             extract_foreground=bool(data.get("extract_foreground", False)),
             ink_color=data.get("ink_color", "#000000"),
             foreground_threshold=int(data.get("foreground_threshold", 18)),
+            foreground_method=data.get("foreground_method", "adaptive"),
         )
 
     def default_params_for_page(self, page_id: int) -> dict[str, Any]:
@@ -490,11 +495,24 @@ class LinmoServices:
                 "blank_ratio": 1.0,
                 "ink_color": "#000000",
                 "foreground_threshold": 35,
+                "foreground_method": "adaptive",
             }
         title = str(page.get("copybook_title", ""))
         if "红楼梦" in title:
-            return {"mode": "col", "column_detection": "gray", "blank_ratio": 1.0, "ink_color": "#000000"}
-        return {"mode": "row", "column_detection": "gray", "blank_ratio": 1.0, "ink_color": "#000000"}
+            return {
+                "mode": "col",
+                "column_detection": "gray",
+                "blank_ratio": 1.0,
+                "ink_color": "#000000",
+                "foreground_method": "adaptive",
+            }
+        return {
+            "mode": "row",
+            "column_detection": "gray",
+            "blank_ratio": 1.0,
+            "ink_color": "#000000",
+            "foreground_method": "adaptive",
+        }
 
     def _apply_preset(self, params: dict[str, Any], preset: dict[str, Any]) -> dict[str, Any]:
         merged = dict(params)
@@ -511,6 +529,17 @@ def file_to_data_url(path: Path) -> str:
         mime = "image/png"
     encoded = base64.b64encode(path.read_bytes()).decode("ascii")
     return f"data:{mime};base64,{encoded}"
+
+
+def _queue_preview_cache_key(item: dict[str, Any], page: dict[str, Any]) -> str:
+    payload = {
+        "version": QUEUE_PREVIEW_CACHE_VERSION,
+        "page_id": int(item["page_id"]),
+        "page_no": int(page["page_no"]),
+        "params": item["params"],
+    }
+    encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha1(encoded).hexdigest()[:12]
 
 
 def _optional_int(value: Any) -> int | None:
