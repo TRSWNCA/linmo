@@ -45,24 +45,11 @@ import {
   Settings24Regular,
 } from "@fluentui/react-icons";
 import packageJson from "../package.json";
-import type { Api, Copybook, GeneratedPost, GeneratedPostFile, Page, Preset, QueueItem } from "./types";
+import type { Api, Copybook, GeneratedPost, GeneratedPostFile, GlyphGroup, Page, PageAnalysis, Preset, QueueItem } from "./types";
 
 type View = "home" | "library" | "make" | "practice" | "presets" | "settings";
 
 const APP_VERSION = `v${packageJson.version}`;
-const TARGET_DEVICE_PRESETS = [
-  { key: "ipad_mini_retina", label: "iPad mini 5", width: 2048, height: 1536 },
-  { key: "ipad_mini_83", label: "iPad mini 6/7", width: 2266, height: 1488 },
-  { key: "ipad_102", label: "iPad 7/8/9", width: 2160, height: 1620 },
-  { key: "ipad_109_air", label: "iPad 10/11, iPad Air 4/5/11-inch M-series", width: 2360, height: 1640 },
-  { key: "ipad_air_3", label: "iPad Air 3", width: 2224, height: 1668 },
-  { key: "ipad_pro_11", label: "iPad Pro 11-inch 2018-2022", width: 2388, height: 1668 },
-  { key: "ipad_pro_11_m4", label: "iPad Pro 11-inch M4 and later", width: 2420, height: 1668 },
-  { key: "ipad_pro_129_air_13", label: "iPad Pro 12.9-inch, iPad Air 13-inch M-series", width: 2732, height: 2048 },
-  { key: "ipad_pro_13_m4", label: "iPad Pro 13-inch M4 and later", width: 2752, height: 2064 },
-];
-const DEFAULT_TARGET_DEVICE_PRESET = "ipad_109_air";
-
 const fallbackApi: Api = {
   async get_home_stats() {
     return { copybooks: 0, exported_pages: 0 };
@@ -99,6 +86,15 @@ const fallbackApi: Api = {
   },
   async render_queue_preview() {
     return "";
+  },
+  async render_queue_previews() {
+    return [];
+  },
+  async analyze_queue_item() {
+    return { version: 1, model_id: "fallback", engine: "fallback", status: "needs_ocr", image_size: [1, 1], groups: [] };
+  },
+  async update_queue_analysis(_itemId, groups) {
+    return { version: 1, model_id: "fallback", engine: "fallback", status: "reviewed", image_size: [1, 1], groups };
   },
   async export_queue_to_pdf(queue_item_ids, _presetId, _outputPath, name, outputFormat) {
     return {
@@ -667,7 +663,8 @@ function Maker({
 }) {
   const [items, setItems] = useState<QueueItem[]>([]);
   const [activeId, setActiveId] = useState<number | null>(null);
-  const [preview, setPreview] = useState("");
+  const [previewPages, setPreviewPages] = useState<string[]>([]);
+  const [previewPage, setPreviewPage] = useState(0);
   const [sourcePreview, setSourcePreview] = useState("");
   const [queueThumbs, setQueueThumbs] = useState<Record<number, string>>({});
   const [comparePreview, setComparePreview] = useState(true);
@@ -677,6 +674,9 @@ function Maker({
   const [exportFormat, setExportFormat] = useState<"pdf" | "png">("pdf");
   const [exporting, setExporting] = useState(false);
   const [draggingId, setDraggingId] = useState<number | null>(null);
+  const [analysis, setAnalysis] = useState<PageAnalysis | null>(null);
+  const [analysisOpen, setAnalysisOpen] = useState(false);
+  const [analyzing, setAnalyzing] = useState(false);
   const previewRunId = useRef(0);
   const active = useMemo(() => items.find((item) => item.id === activeId) || null, [items, activeId]);
   const activeParamsKey = active ? JSON.stringify(active.params) : "";
@@ -697,15 +697,40 @@ function Maker({
     if (!active) return;
     setPreviewing(true);
     try {
-      const rendered = await api().render_queue_preview(active.id);
+      const rendered = await api().render_queue_previews(active.id);
       if (previewRunId.current === runId) {
-        setPreview(rendered);
+        setPreviewPages(rendered);
+        setPreviewPage(0);
       }
     } finally {
       if (previewRunId.current === runId) {
         setPreviewing(false);
       }
     }
+  }
+
+  async function openAnalysis(force = false) {
+    if (!active) return;
+    setAnalyzing(true);
+    try {
+      const result = await api().analyze_queue_item(active.id, force);
+      setAnalysis(result);
+      setAnalysisOpen(true);
+      if (result.warning) setMessage(result.warning);
+    } catch (error) {
+      setMessage(String(error));
+    } finally {
+      setAnalyzing(false);
+    }
+  }
+
+  async function saveAnalysis(groups: GlyphGroup[]) {
+    if (!active) return;
+    const saved = await api().update_queue_analysis(active.id, groups);
+    setAnalysis(saved);
+    setAnalysisOpen(false);
+    const runId = ++previewRunId.current;
+    await renderPreview(runId);
   }
 
   async function openExportDialog() {
@@ -782,13 +807,13 @@ function Maker({
 
   useEffect(() => {
     if (!active) {
-      setPreview("");
+      setPreviewPages([]);
       setSourcePreview("");
       return;
     }
 
     const runId = ++previewRunId.current;
-    setPreview("");
+    setPreviewPages([]);
     setSourcePreview("");
     renderPreview(runId).catch((error) => setMessage(String(error)));
     if (comparePreview) {
@@ -804,6 +829,9 @@ function Maker({
     <section className="makeWorkbench">
       <div className="makeTopbar">
         {active ? <ParamToolbar item={active} update={updateActive} /> : <div className="paramToolbarPlaceholder" />}
+        <Button icon={<LineHorizontal1Regular />} disabled={!active || analyzing} onClick={() => openAnalysis(false)}>
+          {analyzing ? "识别中" : "识别校对"}
+        </Button>
         <Checkbox checked={comparePreview} onChange={(_, data) => setComparePreview(Boolean(data.checked))} label="对照预览" />
         <Button appearance="primary" icon={<DocumentPdf24Regular />} disabled={!items.length} onClick={openExportDialog}>导出</Button>
       </div>
@@ -817,10 +845,17 @@ function Maker({
         ) : comparePreview ? (
           <>
             <PreviewPane title="原图" image={sourcePreview} loading={!sourcePreview} />
-            <PreviewPane title="预览" image={preview} loading={previewing || !preview} />
+            <PreviewPane title={`预览 ${previewPages.length > 1 ? `${previewPage + 1}/${previewPages.length}` : ""}`} image={previewPages[previewPage] || ""} loading={previewing || !previewPages.length} />
           </>
         ) : (
-          <PreviewPane title="预览" image={preview} loading={previewing || !preview} large />
+          <PreviewPane title={`预览 ${previewPages.length > 1 ? `${previewPage + 1}/${previewPages.length}` : ""}`} image={previewPages[previewPage] || ""} loading={previewing || !previewPages.length} large />
+        )}
+        {previewPages.length > 1 && (
+          <div className="previewPager">
+            <Button size="small" disabled={previewPage === 0} onClick={() => setPreviewPage((value) => value - 1)}>上一页</Button>
+            <Text>{previewPage + 1} / {previewPages.length}</Text>
+            <Button size="small" disabled={previewPage === previewPages.length - 1} onClick={() => setPreviewPage((value) => value + 1)}>下一页</Button>
+          </div>
         )}
       </div>
 
@@ -863,6 +898,28 @@ function Maker({
         onCancel={() => setExportDialogOpen(false)}
         onSave={exportPdf}
       />
+      {analysisOpen && analysis && (
+        <AnalysisEditor
+          analysis={analysis}
+          source={sourcePreview}
+          saving={previewing}
+          onCancel={() => setAnalysisOpen(false)}
+          onRecognizeAgain={() => openAnalysis(true)}
+          onSave={saveAnalysis}
+        />
+      )}
+      {analyzing && (
+        <Dialog open>
+          <DialogSurface>
+            <DialogBody>
+              <DialogTitle>正在识别书帖</DialogTitle>
+              <DialogContent>
+                <Spinner label="首次使用会下载本地 OCR 模型，完成后可离线运行" />
+              </DialogContent>
+            </DialogBody>
+          </DialogSurface>
+        </Dialog>
+      )}
     </section>
   );
 }
@@ -910,6 +967,198 @@ function ExportPostDialog({
             <Button appearance="primary" icon={<Save24Regular />} disabled={saving || !name.trim()} onClick={onSave}>
               保存
             </Button>
+          </DialogActions>
+        </DialogBody>
+      </DialogSurface>
+    </Dialog>
+  );
+}
+
+function AnalysisEditor({
+  analysis,
+  source,
+  saving,
+  onCancel,
+  onRecognizeAgain,
+  onSave,
+}: {
+  analysis: PageAnalysis;
+  source: string;
+  saving: boolean;
+  onCancel: () => void;
+  onRecognizeAgain: () => Promise<void>;
+  onSave: (groups: GlyphGroup[]) => Promise<void>;
+}) {
+  const [groups, setGroups] = useState<GlyphGroup[]>(() => JSON.parse(JSON.stringify(analysis.groups)));
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const glyphDrag = useRef<{
+    groupId: string;
+    glyphId: string;
+    startX: number;
+    startY: number;
+    bbox: [number, number, number, number];
+    resize: boolean;
+  } | null>(null);
+  const imageWidth = Math.max(1, analysis.image_size?.[0] || 1);
+  const imageHeight = Math.max(1, analysis.image_size?.[1] || 1);
+
+  useEffect(() => {
+    setGroups(JSON.parse(JSON.stringify(analysis.groups)));
+    setSelectedId(null);
+  }, [analysis]);
+
+  function updateGroup(groupId: string, change: Partial<GlyphGroup>) {
+    setGroups((current) => current.map((group) => group.id === groupId ? { ...group, ...change } : group));
+  }
+
+  function updateGlyph(groupId: string, glyphId: string, change: Record<string, unknown>) {
+    setGroups((current) => current.map((group) => group.id === groupId ? {
+      ...group,
+      glyphs: group.glyphs.map((glyph) => glyph.id === glyphId ? { ...glyph, ...change } : glyph),
+    } : group));
+  }
+
+  function removeGlyph(groupId: string, glyphId: string) {
+    setGroups((current) => current.map((group) => group.id === groupId ? {
+      ...group,
+      glyphs: group.glyphs.filter((glyph) => glyph.id !== glyphId),
+    } : group));
+  }
+
+  function addGlyph(groupId: string) {
+    const size = Math.round(Math.min(imageWidth, imageHeight) * 0.08);
+    const left = Math.round((imageWidth - size) / 2);
+    const top = Math.round((imageHeight - size) / 2);
+    setGroups((current) => current.map((group) => group.id === groupId ? {
+      ...group,
+      glyphs: [...group.glyphs, {
+        id: `manual-${Date.now()}`,
+        text: "字",
+        confidence: 1,
+        bbox: [left, top, left + size, top + size],
+        included: true,
+        kind: "character",
+      }],
+    } : group));
+  }
+
+  return (
+    <Dialog open>
+      <DialogSurface className="analysisDialogSurface">
+        <DialogBody>
+          <DialogTitle>识别与校对</DialogTitle>
+          <DialogContent className="analysisDialogContent">
+            <div className="analysisCanvas">
+              {source ? <img src={source} alt="待校对原图" /> : <Spinner />}
+              <div className="analysisOverlay">
+                {groups.flatMap((group) => group.glyphs.map((glyph) => {
+                  const [left, top, right, bottom] = glyph.bbox;
+                  return (
+                    <button
+                      key={glyph.id}
+                      type="button"
+                      title={`${glyph.text} · ${Math.round(glyph.confidence * 100)}%`}
+                      className={[
+                        "glyphBox",
+                        glyph.confidence < 0.75 ? "lowConfidence" : "",
+                        !glyph.included || !group.included ? "excluded" : "",
+                        selectedId === glyph.id ? "selected" : "",
+                      ].filter(Boolean).join(" ")}
+                      style={{
+                        left: `${left / imageWidth * 100}%`,
+                        top: `${top / imageHeight * 100}%`,
+                        width: `${Math.max(0.3, (right - left) / imageWidth * 100)}%`,
+                        height: `${Math.max(0.3, (bottom - top) / imageHeight * 100)}%`,
+                      }}
+                      onClick={() => setSelectedId(glyph.id)}
+                      onPointerDown={(event) => {
+                        event.currentTarget.setPointerCapture(event.pointerId);
+                        glyphDrag.current = {
+                          groupId: group.id,
+                          glyphId: glyph.id,
+                          startX: event.clientX,
+                          startY: event.clientY,
+                          bbox: [...glyph.bbox],
+                          resize: event.altKey,
+                        };
+                      }}
+                      onPointerMove={(event) => {
+                        const drag = glyphDrag.current;
+                        const overlay = event.currentTarget.parentElement;
+                        if (!drag || drag.glyphId !== glyph.id || !overlay) return;
+                        const dx = Math.round((event.clientX - drag.startX) / overlay.clientWidth * imageWidth);
+                        const dy = Math.round((event.clientY - drag.startY) / overlay.clientHeight * imageHeight);
+                        const [startLeft, startTop, startRight, startBottom] = drag.bbox;
+                        const bbox = drag.resize
+                          ? [startLeft, startTop, Math.max(startLeft + 1, startRight + dx), Math.max(startTop + 1, startBottom + dy)]
+                          : [startLeft + dx, startTop + dy, startRight + dx, startBottom + dy];
+                        updateGlyph(drag.groupId, drag.glyphId, { bbox });
+                      }}
+                      onPointerUp={() => { glyphDrag.current = null; }}
+                      onPointerCancel={() => { glyphDrag.current = null; }}
+                    >
+                      {glyph.text}
+                    </button>
+                  );
+                }))}
+              </div>
+            </div>
+            <div className="analysisList">
+              <Text size={200} className="mutedText">
+                {analysis.model_id} · {analysis.engine === "fallback" ? "降级定位" : "本地 OCR"} · 拖动框可移动，按住 Alt 拖动可缩放
+              </Text>
+              {groups.map((group, groupIndex) => (
+                <Card key={group.id} className="analysisGroup">
+                  <div className="analysisGroupHeader">
+                    <Checkbox
+                      checked={group.included}
+                      label={`正文行 ${groupIndex + 1}`}
+                      onChange={(_, data) => updateGroup(group.id, { included: Boolean(data.checked) })}
+                    />
+                    <Select value={group.direction} onChange={(event) => updateGroup(group.id, { direction: event.target.value === "vertical" ? "vertical" : "horizontal" })}>
+                      <option value="horizontal">横排</option>
+                      <option value="vertical">竖排</option>
+                    </Select>
+                    <Button size="small" icon={<Add24Regular />} onClick={() => addGlyph(group.id)}>补字</Button>
+                  </div>
+                  <div className="glyphEditorGrid">
+                    {group.glyphs.map((glyph) => (
+                      <div key={glyph.id} className={selectedId === glyph.id ? "glyphEditor selected" : "glyphEditor"}>
+                        <Checkbox checked={glyph.included} onChange={(_, data) => updateGlyph(group.id, glyph.id, { included: Boolean(data.checked) })} />
+                        <Input
+                          size="small"
+                          value={glyph.text}
+                          onFocus={() => setSelectedId(glyph.id)}
+                          onChange={(_, data) => updateGlyph(group.id, glyph.id, {
+                            text: data.value,
+                            kind: /^[\p{P}]+$/u.test(data.value) ? "punctuation" : "character",
+                          })}
+                        />
+                        <Input
+                          size="small"
+                          aria-label="字符框坐标"
+                          value={glyph.bbox.join(",")}
+                          onFocus={() => setSelectedId(glyph.id)}
+                          onChange={(_, data) => {
+                            const values = data.value.split(",").map(Number);
+                            if (values.length === 4 && values.every(Number.isFinite)) {
+                              updateGlyph(group.id, glyph.id, { bbox: values.map(Math.round) });
+                            }
+                          }}
+                        />
+                        <Text size={100}>{Math.round(glyph.confidence * 100)}%</Text>
+                        <Button appearance="subtle" size="small" icon={<Dismiss24Regular />} aria-label="删除字符" onClick={() => removeGlyph(group.id, glyph.id)} />
+                      </div>
+                    ))}
+                  </div>
+                </Card>
+              ))}
+            </div>
+          </DialogContent>
+          <DialogActions>
+            <Button disabled={saving} onClick={onCancel}>取消</Button>
+            <Button disabled={saving} onClick={onRecognizeAgain}>重新识别</Button>
+            <Button appearance="primary" disabled={saving} icon={<Save24Regular />} onClick={() => onSave(groups)}>保存校对</Button>
           </DialogActions>
         </DialogBody>
       </DialogSurface>
@@ -995,33 +1244,16 @@ function PreviewPane({ title, image, loading, large = false }: { title: string; 
 
 function ParamToolbar({ item, update }: { item: QueueItem; update: (params: Record<string, unknown>) => Promise<void> }) {
   const params = item.params;
-  const inkColor = /^#[0-9a-fA-F]{6}$/.test(String(params.ink_color || "")) ? String(params.ink_color) : "#000000";
   return (
     <div className="paramToolbar">
-      <Field label="模式" size="small">
-        <Select size="small" value={String(params.mode || "row")} onChange={(event) => update({ mode: event.target.value })}>
-          <option value="row">横向行</option>
-          <option value="col">竖向列</option>
+      <Field label="格子" size="small">
+        <Select size="small" value={String(params.grid_style || "tian")} onChange={(event) => update({ grid_style: event.target.value })}>
+          <option value="tian">田字格</option>
+          <option value="mi">米字格</option>
         </Select>
       </Field>
-      <Field label="检测" size="small">
-        <Select size="small" value={String(params.column_detection || "gray")} onChange={(event) => update({ column_detection: event.target.value })}>
-          <option value="gray">灰底</option>
-          <option value="ink">墨迹</option>
-        </Select>
-      </Field>
-      <Field label="空白" size="small"><Input size="small" type="number" step="0.1" value={String(Number(params.blank_ratio || 1))} onChange={(_, data) => update({ blank_ratio: Number(data.value) })} /></Field>
-      <Field label="字色" size="small"><input className="colorPicker" type="color" value={inkColor} onChange={(event) => update({ ink_color: event.target.value })} /></Field>
-      <Field label="阈值" size="small"><Input size="small" type="number" value={String(Number(params.foreground_threshold || 18))} onChange={(_, data) => update({ foreground_threshold: Number(data.value) })} /></Field>
-      <Field label="前景" size="small">
-        <Select size="small" value={String(params.foreground_method || "adaptive")} onChange={(event) => update({ foreground_method: event.target.value })}>
-          <option value="adaptive">鲁棒</option>
-          <option value="global">旧版</option>
-        </Select>
-      </Field>
-      <Field label="列" size="small"><Input size="small" type="number" placeholder="自动" value={params.columns ? String(params.columns) : ""} onChange={(_, data) => update({ columns: data.value ? Number(data.value) : "" })} /></Field>
-      <Field label="行" size="small"><Input size="small" type="number" placeholder="自动" value={params.rows ? String(params.rows) : ""} onChange={(_, data) => update({ rows: data.value ? Number(data.value) : "" })} /></Field>
-      <Field label="背景" size="small"><Input size="small" value={String(params.background_image || "")} onChange={(_, data) => update({ background_image: data.value })} /></Field>
+      <Field label="格宽 mm" size="small"><Input size="small" type="number" min={10} max={30} step="0.5" value={String(Number(params.cell_size_mm || 15))} onChange={(_, data) => update({ cell_size_mm: Number(data.value) })} /></Field>
+      <Field label="边距 mm" size="small"><Input size="small" type="number" min={5} max={30} step="0.5" value={String(Number(params.margin_mm || 15))} onChange={(_, data) => update({ margin_mm: Number(data.value) })} /></Field>
     </div>
   );
 }
@@ -1175,15 +1407,10 @@ function formatFileSize(size: number) {
 
 function Presets({ setMessage }: { setMessage: (value: string) => void }) {
   const [presets, setPresets] = useState<Preset[]>([]);
-  const [form, setForm] = useState({ name: "", background_image: "", ink_color: "#000000", foreground_threshold: 18, foreground_method: "adaptive", mode: "row", column_detection: "gray" });
+  const [form, setForm] = useState({ name: "", grid_style: "tian", cell_size_mm: 15, margin_mm: 15 });
 
   async function load() {
     setPresets(await api().list_presets());
-  }
-
-  async function chooseBackground() {
-    const path = await api().choose_background_image();
-    if (path) setForm({ ...form, background_image: path });
   }
 
   async function create() {
@@ -1191,7 +1418,7 @@ function Presets({ setMessage }: { setMessage: (value: string) => void }) {
       setMessage("预设需要名称");
       return;
     }
-    await api().create_preset({ ...form, params: { foreground_method: form.foreground_method } });
+    await api().create_preset({ name: form.name, params: { grid_style: form.grid_style, cell_size_mm: form.cell_size_mm, margin_mm: form.margin_mm } });
     setForm({ ...form, name: "" });
     await load();
   }
@@ -1205,46 +1432,28 @@ function Presets({ setMessage }: { setMessage: (value: string) => void }) {
       <div className="sectionHeader">
         <div>
           <Title1>预设</Title1>
-          <Text className="mutedText">管理背景、字色和默认检测参数</Text>
+          <Text className="mutedText">管理田字格、米字格和页面尺寸</Text>
         </div>
         <Button appearance="primary" icon={<Save24Regular />} onClick={create}>保存预设</Button>
       </div>
       <Card className="contentCard">
         <div className="formGrid">
           <Field label="名称"><Input value={form.name} onChange={(_, data) => setForm({ ...form, name: data.value })} /></Field>
-          <Field label="背景图"><Input value={form.background_image} onChange={(_, data) => setForm({ ...form, background_image: data.value })} /></Field>
-          <div className="fieldButton">
-            <Tooltip content="选择背景图" relationship="label">
-              <Button icon={<Image24Regular />} onClick={chooseBackground}>选择背景图</Button>
-            </Tooltip>
-          </div>
-          <Field label="字色"><Input value={form.ink_color} onChange={(_, data) => setForm({ ...form, ink_color: data.value })} /></Field>
-          <Field label="前景阈值"><Input type="number" value={String(form.foreground_threshold)} onChange={(_, data) => setForm({ ...form, foreground_threshold: Number(data.value) })} /></Field>
-          <Field label="前景策略">
-            <Select value={form.foreground_method} onChange={(event) => setForm({ ...form, foreground_method: event.target.value })}>
-              <option value="adaptive">鲁棒</option>
-              <option value="global">旧版</option>
+          <Field label="格子">
+            <Select value={form.grid_style} onChange={(event) => setForm({ ...form, grid_style: event.target.value })}>
+              <option value="tian">田字格</option>
+              <option value="mi">米字格</option>
             </Select>
           </Field>
-          <Field label="模式">
-            <Select value={form.mode} onChange={(event) => setForm({ ...form, mode: event.target.value })}>
-              <option value="row">横向行</option>
-              <option value="col">竖向列</option>
-            </Select>
-          </Field>
-          <Field label="列检测">
-            <Select value={form.column_detection} onChange={(event) => setForm({ ...form, column_detection: event.target.value })}>
-              <option value="gray">灰底栏</option>
-              <option value="ink">墨迹列</option>
-            </Select>
-          </Field>
+          <Field label="格宽（mm）"><Input type="number" min={10} max={30} step="0.5" value={String(form.cell_size_mm)} onChange={(_, data) => setForm({ ...form, cell_size_mm: Number(data.value) })} /></Field>
+          <Field label="边距（mm）"><Input type="number" min={5} max={30} step="0.5" value={String(form.margin_mm)} onChange={(_, data) => setForm({ ...form, margin_mm: Number(data.value) })} /></Field>
         </div>
       </Card>
       <div className="presetGrid">
         {presets.map((preset) => (
           <Card key={preset.id} className="presetCard">
-            <CardHeader header={<Text weight="semibold">{preset.name}</Text>} description={<Text size={200}>{preset.mode} · {preset.column_detection}</Text>} />
-            <Text size={200}>{preset.ink_color} · 阈值 {preset.foreground_threshold} · {String(preset.params?.foreground_method || "adaptive")}</Text>
+            <CardHeader header={<Text weight="semibold">{preset.name}</Text>} description={<Text size={200}>{preset.params?.grid_style === "mi" ? "米字格" : "田字格"}</Text>} />
+            <Text size={200}>{String(preset.params?.cell_size_mm || 15)} mm · 边距 {String(preset.params?.margin_mm || 15)} mm</Text>
           </Card>
         ))}
       </div>
@@ -1266,7 +1475,7 @@ function Settings({ setMessage }: { setMessage: (value: string) => void }) {
       <div className="sectionHeader">
         <div>
           <Title1>设置</Title1>
-          <Text className="mutedText">配置本地数据目录和默认导出行为</Text>
+          <Text className="mutedText">配置本地数据目录和 A4 导出行为</Text>
         </div>
         <Button appearance="primary" icon={<Save24Regular />} onClick={save}>保存</Button>
       </div>
@@ -1275,18 +1484,6 @@ function Settings({ setMessage }: { setMessage: (value: string) => void }) {
           <Field label="数据目录"><Input value={settings.data_dir || ""} onChange={(_, data) => setSettings({ ...settings, data_dir: data.value })} /></Field>
           <Field label="默认 DPI"><Input value={settings.default_dpi || "300"} onChange={(_, data) => setSettings({ ...settings, default_dpi: data.value })} /></Field>
           <Field label="默认导出目录"><Input value={settings.default_export_dir || ""} onChange={(_, data) => setSettings({ ...settings, default_export_dir: data.value })} /></Field>
-          <Field label="目标设备">
-            <Select
-              value={settings.target_device_preset || DEFAULT_TARGET_DEVICE_PRESET}
-              onChange={(event) => setSettings({ ...settings, target_device_preset: event.target.value })}
-            >
-              {TARGET_DEVICE_PRESETS.map((preset) => (
-                <option key={preset.key} value={preset.key}>
-                  {preset.label} · {preset.width} x {preset.height}
-                </option>
-              ))}
-            </Select>
-          </Field>
           <Field label="WebDAV 地址"><Input value={settings.webdav_url || ""} onChange={(_, data) => setSettings({ ...settings, webdav_url: data.value })} /></Field>
           <Field label="WebDAV 用户名"><Input value={settings.webdav_username || ""} onChange={(_, data) => setSettings({ ...settings, webdav_username: data.value })} /></Field>
           <Field label="WebDAV 应用密码"><Input type="password" value={settings.webdav_password || ""} onChange={(_, data) => setSettings({ ...settings, webdav_password: data.value })} /></Field>

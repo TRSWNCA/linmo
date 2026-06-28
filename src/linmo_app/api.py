@@ -1,8 +1,10 @@
 from __future__ import annotations
 
-import webview
 from pathlib import Path
 from typing import Any
+
+import fitz
+import webview
 
 from .paths import AppPaths, default_app_paths
 from .services import LinmoServices, file_to_data_url
@@ -83,6 +85,22 @@ class LinmoApi:
     def render_queue_preview(self, item_id: int) -> str:
         return file_to_data_url(self.services.render_queue_preview(item_id))
 
+    def render_queue_previews(self, item_id: int) -> list[str]:
+        return [
+            file_to_data_url(path)
+            for path in self.services.render_queue_previews(int(item_id))
+        ]
+
+    def analyze_queue_item(self, item_id: int, force: bool = False) -> dict[str, Any]:
+        return self.services.analyze_queue_item(int(item_id), bool(force))
+
+    def update_queue_analysis(
+        self,
+        item_id: int,
+        groups: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        return self.services.update_queue_analysis(int(item_id), groups)
+
     def export_queue_to_pdf(
         self,
         queue_item_ids: list[int],
@@ -93,9 +111,11 @@ class LinmoApi:
     ) -> dict[str, Any]:
         if name is not None:
             post = self.services.export_queue_to_generated_post(queue_item_ids, name, preset_id, output_format)
-            return {"output_path": post["original_pdf_path"], "page_count": len(queue_item_ids), "generated_post": post}
+            return {"output_path": post["original_pdf_path"], "page_count": post["page_count"], "generated_post": post}
         path = self.services.export_queue_to_pdf(queue_item_ids, preset_id, output_path)
-        return {"output_path": str(path), "page_count": len(queue_item_ids)}
+        with fitz.open(path) as document:
+            page_count = document.page_count
+        return {"output_path": str(path), "page_count": page_count}
 
     def get_next_generated_post_name(self) -> str:
         return self.services.next_generated_post_name()

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import tempfile
 import unittest
 import urllib.error
@@ -11,6 +12,8 @@ from PIL import Image, ImageDraw
 from linmo_app.api import LinmoApi
 from linmo_app.paths import AppPaths
 from linmo_app.services import LinmoServices, _WebDavClient
+
+os.environ["LINMO_DISABLE_OCR"] = "1"
 
 
 class AppServicesTests(unittest.TestCase):
@@ -34,17 +37,17 @@ class AppServicesTests(unittest.TestCase):
             self.assertEqual(thumb, services.create_thumbnail(pages[0]["id"]))
 
             params = {
-                "mode": "row",
-                "blank_ratio": 0.5,
-                "ink_color": "#000000",
-                "foreground_threshold": 18,
+                "grid_style": "tian",
+                "cell_size_mm": 15,
+                "margin_mm": 15,
+                "dpi": 72,
             }
             queue_item = services.repo.add_queue_item(pages[0]["id"], params)
             preview = services.render_queue_preview(queue_item["id"])
             self.assertTrue(preview.exists())
             self.assertIn(f"queue-{queue_item['id']}-", preview.name)
 
-            updated = services.repo.update_queue_item(queue_item["id"], {"blank_ratio": 0.75})
+            updated = services.repo.update_queue_item(queue_item["id"], {"grid_style": "mi"})
             updated_preview = services.render_queue_preview(updated["id"])
             self.assertTrue(updated_preview.exists())
             self.assertNotEqual(preview, updated_preview)
@@ -64,7 +67,7 @@ class AppServicesTests(unittest.TestCase):
             page = services.repo.list_pages(imported[0]["id"])[0]
             queue_item = services.repo.add_queue_item(
                 page["id"],
-                {"mode": "row", "blank_ratio": 0.5, "ink_color": "#000000"},
+                {"grid_style": "tian", "cell_size_mm": 15, "dpi": 72},
             )
 
             self.assertEqual(services.next_generated_post_name(), "卷一")
@@ -95,7 +98,7 @@ class AppServicesTests(unittest.TestCase):
             imported = services.import_copybooks([str(image_dir)])
             pages = services.repo.list_pages(imported[0]["id"])
             queue_items = [
-                services.repo.add_queue_item(page["id"], {"mode": "row", "blank_ratio": 0.5, "ink_color": "#000000"})
+                services.repo.add_queue_item(page["id"], {"grid_style": "tian", "cell_size_mm": 15, "dpi": 72})
                 for page in pages
             ]
 
@@ -110,17 +113,31 @@ class AppServicesTests(unittest.TestCase):
             self.assertTrue(Path(post["thumb_path"]).exists())
             self.assertEqual(services.repo.stats()["exported_pages"], 2)
 
-    def test_png_target_device_limits_height_by_split_direction(self) -> None:
+    def test_page_analysis_is_cached_and_can_be_reviewed(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            services = LinmoServices(AppPaths(Path(tmp) / "data"))
-            services.repo.update_settings({"target_device_preset": "ipad_mini_retina"})
-            tall = Image.new("RGB", (1000, 5000), (255, 255, 255))
+            root = Path(tmp)
+            source = root / "sample.png"
+            _make_ruled_image(source)
+            services = LinmoServices(AppPaths(root / "data"))
+            imported = services.import_copybooks([str(source)])
+            page = services.repo.list_pages(imported[0]["id"])[0]
+            item = services.repo.add_queue_item(
+                page["id"], {"grid_style": "tian", "cell_size_mm": 15, "dpi": 72}
+            )
 
-            vertical = services._scale_png_for_target(tall, "col")
-            horizontal = services._scale_png_for_target(tall, "row")
+            first = services.analyze_queue_item(item["id"])
+            second = services.analyze_queue_item(item["id"])
+            self.assertEqual(first, second)
+            self.assertTrue(first["groups"])
 
-            self.assertEqual(vertical.height, 2048)
-            self.assertEqual(horizontal.height, 4096)
+            groups = first["groups"]
+            groups[0]["glyphs"][0]["text"] = "改"
+            reviewed = services.update_queue_analysis(item["id"], groups)
+            self.assertEqual(reviewed["status"], "reviewed")
+            self.assertEqual(
+                services.analyze_queue_item(item["id"])["groups"][0]["glyphs"][0]["text"],
+                "改",
+            )
 
     def test_api_start_clears_previous_queue_items(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -26,6 +26,33 @@ export type QueueItem = {
   params: Record<string, unknown>;
 };
 
+export type Glyph = {
+  id: string;
+  text: string;
+  confidence: number;
+  bbox: [number, number, number, number];
+  polygon?: number[][];
+  included: boolean;
+  kind: "character" | "punctuation";
+};
+
+export type GlyphGroup = {
+  id: string;
+  direction: "horizontal" | "vertical";
+  included: boolean;
+  glyphs: Glyph[];
+};
+
+export type PageAnalysis = {
+  version: number;
+  model_id: string;
+  engine: string;
+  status: string;
+  warning?: string;
+  image_size: [number, number];
+  groups: GlyphGroup[];
+};
+
 export type Preset = {
   id: number;
   name: string;
@@ -72,6 +99,9 @@ export type Api = {
   list_queue_items(): Promise<QueueItem[]>;
   update_queue_item(item_id: number, params: Record<string, unknown>): Promise<QueueItem>;
   render_queue_preview(item_id: number): Promise<string>;
+  render_queue_previews(item_id: number): Promise<string[]>;
+  analyze_queue_item(item_id: number, force?: boolean): Promise<PageAnalysis>;
+  update_queue_analysis(item_id: number, groups: GlyphGroup[]): Promise<PageAnalysis>;
   export_queue_to_pdf(queue_item_ids: number[], preset_id?: number | null, output_path?: string | null, name?: string | null, output_format?: string | null): Promise<{ output_path: string; page_count: number; generated_post?: GeneratedPost }>;
   get_next_generated_post_name(): Promise<string>;
   list_generated_posts(): Promise<GeneratedPost[]>;

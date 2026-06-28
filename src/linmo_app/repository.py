@@ -43,6 +43,16 @@ CREATE TABLE IF NOT EXISTS queue_items (
     created_at INTEGER NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS page_analyses (
+    page_id INTEGER PRIMARY KEY REFERENCES pages(id) ON DELETE CASCADE,
+    source_fingerprint TEXT NOT NULL,
+    model_id TEXT NOT NULL,
+    status TEXT NOT NULL,
+    analysis_json TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS presets (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL UNIQUE,
@@ -209,6 +219,54 @@ class Repository:
     def update_page_thumb(self, page_id: int, thumb_path: Path) -> None:
         with self.connect() as conn:
             conn.execute("UPDATE pages SET thumb_path = ? WHERE id = ?", (str(thumb_path), page_id))
+
+    def get_page_analysis(self, page_id: int) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM page_analyses WHERE page_id = ?", (page_id,)
+            ).fetchone()
+        if row is None:
+            return None
+        data = _row_to_dict(row)
+        data["analysis"] = json.loads(data.pop("analysis_json"))
+        return data
+
+    def save_page_analysis(
+        self,
+        page_id: int,
+        analysis: dict[str, Any],
+    ) -> dict[str, Any]:
+        now = _now()
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO page_analyses
+                    (page_id, source_fingerprint, model_id, status, analysis_json, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(page_id) DO UPDATE SET
+                    source_fingerprint = excluded.source_fingerprint,
+                    model_id = excluded.model_id,
+                    status = excluded.status,
+                    analysis_json = excluded.analysis_json,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    page_id,
+                    str(analysis.get("source_fingerprint", "")),
+                    str(analysis.get("model_id", "")),
+                    str(analysis.get("status", "ready")),
+                    json.dumps(analysis, ensure_ascii=False),
+                    now,
+                    now,
+                ),
+            )
+        saved = self.get_page_analysis(page_id)
+        assert saved is not None
+        return saved
+
+    def delete_page_analysis(self, page_id: int) -> None:
+        with self.connect() as conn:
+            conn.execute("DELETE FROM page_analyses WHERE page_id = ?", (page_id,))
 
     def list_pages(self, copybook_id: int) -> list[dict[str, Any]]:
         with self.connect() as conn:

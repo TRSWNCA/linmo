@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import os
 import posixpath
 import shutil
 import time
@@ -16,26 +17,21 @@ from typing import Any
 import fitz
 from PIL import Image
 
-from linmo.processing import ProcessingParams, load_input_page, process_image
+from linmo.glyph_pipeline import (
+    ANALYSIS_VERSION,
+    analyze_page,
+    render_practice_pages,
+    source_fingerprint,
+    update_analysis,
+)
+from linmo.processing import ProcessingParams, load_input_page
 
 from .paths import AppPaths
 from .repository import Repository
 
 IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tif", ".tiff"}
 GENERATED_FILE_SUFFIXES = {".pdf", ".png"}
-IPAD_DEVICE_PRESETS: dict[str, tuple[str, int, int]] = {
-    "ipad_mini_retina": ("iPad mini 5", 2048, 1536),
-    "ipad_mini_83": ("iPad mini 6/7", 2266, 1488),
-    "ipad_102": ("iPad 7/8/9", 2160, 1620),
-    "ipad_109_air": ("iPad 10/11, iPad Air 4/5/11-inch M-series", 2360, 1640),
-    "ipad_air_3": ("iPad Air 3", 2224, 1668),
-    "ipad_pro_11": ("iPad Pro 11-inch 2018-2022", 2388, 1668),
-    "ipad_pro_11_m4": ("iPad Pro 11-inch M4 and later", 2420, 1668),
-    "ipad_pro_129_air_13": ("iPad Pro 12.9-inch, iPad Air 13-inch M-series", 2732, 2048),
-    "ipad_pro_13_m4": ("iPad Pro 13-inch M4 and later", 2752, 2064),
-}
-DEFAULT_TARGET_DEVICE_PRESET = "ipad_109_air"
-QUEUE_PREVIEW_CACHE_VERSION = "gray-split-v2"
+QUEUE_PREVIEW_CACHE_VERSION = "glyph-grid-v1"
 
 
 class LinmoServices:
@@ -51,7 +47,6 @@ class LinmoServices:
             "webdav_username": "",
             "webdav_password": "",
             "webdav_remote_root": "Linmo",
-            "target_device_preset": DEFAULT_TARGET_DEVICE_PRESET,
         }
         current_settings = self.repo.get_settings()
         missing_defaults = {key: value for key, value in defaults.items() if key not in current_settings}
@@ -122,18 +117,55 @@ class LinmoServices:
             return load_input_page(Path(page["copybook_source_path"]), int(page["page_no"]), dpi)
         return load_input_page(Path(page["source_path"]), 1, dpi)
 
-    def render_queue_preview(self, item_id: int) -> Path:
+    def analyze_queue_item(self, item_id: int, force: bool = False) -> dict[str, Any]:
         item = self.repo.get_queue_item(item_id)
         page = self.repo.get_page_with_copybook(int(item["page_id"]))
         params = self._params_from_dict(item["params"])
         source = self.load_page_image(page, dpi=params.dpi)
-        output = process_image(source, params)
-        output.thumbnail((1200, 1200))
+        fingerprint = source_fingerprint(source)
+        cached = self.repo.get_page_analysis(int(item["page_id"]))
+        if (
+            not force
+            and cached is not None
+            and cached["source_fingerprint"] == fingerprint
+            and int(cached["analysis"].get("version", 0)) == ANALYSIS_VERSION
+        ):
+            return cached["analysis"]
+        if os.environ.get("LINMO_DISABLE_OCR") != "1":
+            os.environ.setdefault("PADDLE_PDX_CACHE_HOME", str(self.paths.models_dir))
+        analysis = analyze_page(source)
+        analysis["dpi"] = params.dpi
+        return self.repo.save_page_analysis(int(item["page_id"]), analysis)["analysis"]
+
+    def update_queue_analysis(
+        self,
+        item_id: int,
+        groups: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        item = self.repo.get_queue_item(item_id)
+        analysis = self.analyze_queue_item(item_id)
+        updated = update_analysis(analysis, groups=groups)
+        return self.repo.save_page_analysis(int(item["page_id"]), updated)["analysis"]
+
+    def render_queue_previews(self, item_id: int) -> list[Path]:
+        item = self.repo.get_queue_item(item_id)
+        page = self.repo.get_page_with_copybook(int(item["page_id"]))
+        params = self._params_from_dict(item["params"])
+        source = self.load_page_image(page, dpi=params.dpi)
+        analysis = self.analyze_queue_item(item_id)
+        outputs = render_practice_pages(source, analysis, params.grid)
         cache_key = _queue_preview_cache_key(item, page)
-        out_path = self.paths.previews_dir / f"queue-{item_id}-{cache_key}.jpg"
-        out_path.parent.mkdir(parents=True, exist_ok=True)
-        output.convert("RGB").save(out_path, "JPEG", quality=88)
-        return out_path
+        paths = []
+        for index, output in enumerate(outputs, start=1):
+            output.thumbnail((1200, 1200))
+            out_path = self.paths.previews_dir / f"queue-{item_id}-{cache_key}-{index}.jpg"
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+            output.convert("RGB").save(out_path, "JPEG", quality=88)
+            paths.append(out_path)
+        return paths
+
+    def render_queue_preview(self, item_id: int) -> Path:
+        return self.render_queue_previews(item_id)[0]
 
     def export_queue_to_pdf(
         self,
@@ -173,7 +205,7 @@ class LinmoServices:
         if clean_format not in {"pdf", "png"}:
             raise ValueError("output_format must be pdf or png")
 
-        post = self.repo.create_generated_post(clean_name, len(queue_item_ids))
+        post = self.repo.create_generated_post(clean_name, 0)
         post_dir = self._generated_post_dir(int(post["id"]))
         post_dir.mkdir(parents=True, exist_ok=True)
         results_dir = post_dir / "results"
@@ -182,13 +214,16 @@ class LinmoServices:
         if clean_format == "pdf":
             original_path = post_dir / "original.pdf"
             self.export_queue_to_pdf(queue_item_ids, preset_id, str(original_path))
+            with fitz.open(original_path) as document:
+                generated_page_count = document.page_count
         else:
             original_dir = post_dir / "original"
             original_dir.mkdir(parents=True, exist_ok=True)
-            images = self._render_queue_images(queue_item_ids, preset_id, apply_png_target=True)
+            images = self._render_queue_images(queue_item_ids, preset_id)
             saved_paths = self._save_png_pages(images, original_dir)
             original_path = saved_paths[0]
             self.repo.record_export(original_path, len(saved_paths))
+            generated_page_count = len(saved_paths)
 
         thumb = self._create_generated_post_thumbnail(int(post["id"]), original_path)
         return self.repo.update_generated_post(
@@ -197,6 +232,7 @@ class LinmoServices:
                 "original_pdf_path": str(original_path),
                 "output_format": clean_format,
                 "thumb_path": str(thumb),
+                "page_count": generated_page_count,
                 "result_count": self._count_generated_results(results_dir),
                 "sync_status": "local",
             },
@@ -388,7 +424,6 @@ class LinmoServices:
         self,
         queue_item_ids: list[int],
         preset_id: int | None = None,
-        apply_png_target: bool = False,
     ) -> list[Image.Image]:
         if not queue_item_ids:
             raise ValueError("queue_item_ids cannot be empty")
@@ -401,22 +436,11 @@ class LinmoServices:
             if preset:
                 params_dict = self._apply_preset(params_dict, preset)
             params = self._params_from_dict(params_dict)
-            image = process_image(self.load_page_image(page, dpi=params.dpi), params)
-            if apply_png_target:
-                image = self._scale_png_for_target(image, params.mode)
-            images.append(image)
+            source = self.load_page_image(page, dpi=params.dpi)
+            analysis = self.analyze_queue_item(int(item_id))
+            rendered = render_practice_pages(source, analysis, params.grid)
+            images.extend(rendered)
         return images
-
-    def _scale_png_for_target(self, image: Image.Image, mode: str) -> Image.Image:
-        settings = self.repo.get_settings()
-        preset_key = settings.get("target_device_preset", DEFAULT_TARGET_DEVICE_PRESET)
-        preset = IPAD_DEVICE_PRESETS.get(preset_key) or IPAD_DEVICE_PRESETS[DEFAULT_TARGET_DEVICE_PRESET]
-        long_side = max(preset[1], preset[2])
-        max_height = long_side if mode == "col" else long_side * 2
-        if image.height <= max_height:
-            return image
-        width = max(1, round(image.width * max_height / image.height))
-        return image.resize((width, max_height), Image.Resampling.LANCZOS)
 
     def _save_png_pages(self, images: list[Image.Image], output_dir: Path) -> list[Path]:
         saved_paths = []
@@ -469,56 +493,22 @@ class LinmoServices:
 
     def _params_from_dict(self, data: dict[str, Any]) -> ProcessingParams:
         return ProcessingParams(
-            mode=data.get("mode", "row"),
-            column_detection=data.get("column_detection", "gray"),
-            columns=_optional_int(data.get("columns")),
-            rows=_optional_int(data.get("rows")),
-            blank_ratio=float(data.get("blank_ratio", 1.0)),
+            grid_style=str(data.get("grid_style", "tian")),
+            cell_size_mm=float(data.get("cell_size_mm", 15.0)),
+            margin_mm=float(data.get("margin_mm", 15.0)),
             dpi=int(data.get("dpi", 300)),
-            gray_min=int(data.get("gray_min", 70)),
-            gray_max=int(data.get("gray_max", 210)),
-            ink_max=int(data.get("ink_max", 170)),
-            line_max=int(data.get("line_max", 225)),
-            background_image=_optional_path(data.get("background_image")),
-            extract_foreground=bool(data.get("extract_foreground", False)),
-            ink_color=data.get("ink_color", "#000000"),
-            foreground_threshold=int(data.get("foreground_threshold", 18)),
-            foreground_method=data.get("foreground_method", "adaptive"),
         )
 
     def default_params_for_page(self, page_id: int) -> dict[str, Any]:
-        page = self.repo.get_page_with_copybook(page_id)
-        if page["copybook_source_type"] == "images":
-            return {
-                "mode": "col",
-                "column_detection": "ink",
-                "blank_ratio": 1.0,
-                "ink_color": "#000000",
-                "foreground_threshold": 35,
-                "foreground_method": "adaptive",
-            }
-        title = str(page.get("copybook_title", ""))
-        if "红楼梦" in title:
-            return {
-                "mode": "col",
-                "column_detection": "gray",
-                "blank_ratio": 1.0,
-                "ink_color": "#000000",
-                "foreground_method": "adaptive",
-            }
         return {
-            "mode": "row",
-            "column_detection": "gray",
-            "blank_ratio": 1.0,
-            "ink_color": "#000000",
-            "foreground_method": "adaptive",
+            "grid_style": "tian",
+            "cell_size_mm": 15.0,
+            "margin_mm": 15.0,
+            "dpi": int(self.repo.get_settings().get("default_dpi", "300")),
         }
 
     def _apply_preset(self, params: dict[str, Any], preset: dict[str, Any]) -> dict[str, Any]:
         merged = dict(params)
-        for key in ["background_image", "ink_color", "foreground_threshold", "mode", "column_detection"]:
-            if preset.get(key) not in (None, ""):
-                merged[key] = preset[key]
         merged.update(preset.get("params", {}))
         return merged
 
@@ -540,18 +530,6 @@ def _queue_preview_cache_key(item: dict[str, Any], page: dict[str, Any]) -> str:
     }
     encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return hashlib.sha1(encoded).hexdigest()[:12]
-
-
-def _optional_int(value: Any) -> int | None:
-    if value in (None, ""):
-        return None
-    return int(value)
-
-
-def _optional_path(value: Any) -> Path | None:
-    if value in (None, ""):
-        return None
-    return Path(str(value)).expanduser()
 
 
 def _chinese_number(value: int) -> str:

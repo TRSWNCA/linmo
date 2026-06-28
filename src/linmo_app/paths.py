@@ -41,6 +41,10 @@ class AppPaths:
     def generated_dir(self) -> Path:
         return self.root / "generated"
 
+    @property
+    def models_dir(self) -> Path:
+        return self.root / "models"
+
     def ensure(self) -> None:
         for path in [
             self.root,
@@ -51,6 +55,7 @@ class AppPaths:
             self.presets_dir,
             self.exports_dir,
             self.generated_dir,
+            self.models_dir,
         ]:
             path.mkdir(parents=True, exist_ok=True)
 
