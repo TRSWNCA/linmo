@@ -25,6 +25,7 @@ from linmo.glyph_pipeline import (
     update_analysis,
 )
 from linmo.processing import ProcessingParams, load_input_page
+from linmo.runtime import add_runtime_log, log_exception, set_runtime_status
 
 from .paths import AppPaths
 from .repository import Repository
@@ -176,23 +177,41 @@ class LinmoServices:
         return self._apply_page_crop(image, page)
 
     def analyze_page(self, page_id: int, force: bool = False, dpi: int | None = None) -> dict[str, Any]:
-        page = self.repo.get_page_with_copybook(page_id)
-        resolved_dpi = int(dpi or self.default_params_for_page(page_id)["dpi"])
-        source = self.load_page_image(page, dpi=resolved_dpi)
-        fingerprint = source_fingerprint(source)
-        cached = self.repo.get_page_analysis(page_id)
-        if (
-            not force
-            and cached is not None
-            and cached["source_fingerprint"] == fingerprint
-            and int(cached["analysis"].get("version", 0)) == ANALYSIS_VERSION
-        ):
-            return cached["analysis"]
-        if os.environ.get("LINMO_DISABLE_OCR") != "1":
-            os.environ.setdefault("PADDLE_PDX_CACHE_HOME", str(self.paths.models_dir))
-        analysis = analyze_page(source)
-        analysis["dpi"] = resolved_dpi
-        return self.repo.save_page_analysis(page_id, analysis)["analysis"]
+        set_runtime_status("ocr", "loading_page", "正在读取页面", page_id=page_id)
+        try:
+            page = self.repo.get_page_with_copybook(page_id)
+            resolved_dpi = int(dpi or self.default_params_for_page(page_id)["dpi"])
+            source = self.load_page_image(page, dpi=resolved_dpi)
+            fingerprint = source_fingerprint(source)
+            cached = self.repo.get_page_analysis(page_id)
+            if (
+                not force
+                and cached is not None
+                and cached["source_fingerprint"] == fingerprint
+                and int(cached["analysis"].get("version", 0)) == ANALYSIS_VERSION
+            ):
+                add_runtime_log("info", "backend.ocr", f"页面 {page_id} 使用识别缓存")
+                set_runtime_status("ocr", "cache_hit", "正在读取识别缓存", page_id=page_id)
+                return cached["analysis"]
+            if os.environ.get("LINMO_DISABLE_OCR") != "1":
+                os.environ.setdefault("PADDLE_PDX_CACHE_HOME", str(self.paths.models_dir))
+
+            def report_progress(stage: str, message: str) -> None:
+                set_runtime_status("ocr", stage, message, page_id=page_id)
+
+            analysis = analyze_page(source, progress=report_progress)
+            analysis["dpi"] = resolved_dpi
+            saved = self.repo.save_page_analysis(page_id, analysis)["analysis"]
+            if analysis.get("warning"):
+                add_runtime_log("warning", "backend.ocr", str(analysis["warning"]), echo=False)
+                set_runtime_status("ocr", "warning", str(analysis["warning"]), page_id=page_id)
+            else:
+                set_runtime_status("ocr", "complete", "识别完成", page_id=page_id)
+            return saved
+        except Exception as exc:
+            set_runtime_status("ocr", "error", f"识别失败：{exc}", page_id=page_id)
+            log_exception("backend.services", f"页面 {page_id} 识别失败", exc)
+            raise
 
     def update_page_analysis(
         self,

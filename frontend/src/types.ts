@@ -72,6 +72,30 @@ export type PageAnalysis = {
   ocr_groups?: GlyphGroup[];
 };
 
+export type RuntimeLogEntry = {
+  id: number;
+  timestamp: number;
+  level: "debug" | "info" | "warning" | "error";
+  source: string;
+  message: string;
+  details: string;
+};
+
+export type RuntimeStatus = {
+  operation: string;
+  stage: string;
+  message: string;
+  page_id: number | null;
+  updated_at: number;
+};
+
+export type RuntimeDiagnostics = {
+  status: RuntimeStatus;
+  entries: RuntimeLogEntry[];
+  last_id: number;
+  log_path: string;
+};
+
 export type Preset = {
   id: number;
   name: string;
@@ -144,6 +168,9 @@ export type Api = {
   delete_preset(preset_id: number): Promise<{ ok: boolean }>;
   get_settings(): Promise<Record<string, string>>;
   update_settings(settings: Record<string, string>): Promise<Record<string, string>>;
+  get_runtime_diagnostics(since_id?: number): Promise<RuntimeDiagnostics>;
+  append_runtime_log(level: string, source: string, message: string, details?: string): Promise<RuntimeLogEntry>;
+  clear_runtime_logs(): Promise<{ ok: boolean }>;
   choose_import_files(): Promise<string[]>;
   choose_background_image(): Promise<string>;
   choose_cover_image(): Promise<string>;

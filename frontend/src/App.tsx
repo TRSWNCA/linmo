@@ -44,7 +44,20 @@ import {
   Settings24Regular,
 } from "@fluentui/react-icons";
 import packageJson from "../package.json";
-import type { Api, Copybook, GeneratedPost, GeneratedPostFile, Glyph, GlyphGroup, Page, PageAnalysis, PageDetail, Preset } from "./types";
+import type {
+  Api,
+  Copybook,
+  GeneratedPost,
+  GeneratedPostFile,
+  Glyph,
+  GlyphGroup,
+  Page,
+  PageAnalysis,
+  PageDetail,
+  Preset,
+  RuntimeDiagnostics,
+  RuntimeLogEntry,
+} from "./types";
 
 type View = "home" | "library" | "make" | "practice" | "presets" | "settings";
 type CopybookMetadataForm = {
@@ -267,6 +280,27 @@ const fallbackApi: Api = {
   async update_settings(settings) {
     return settings;
   },
+  async get_runtime_diagnostics() {
+    return {
+      status: { operation: "", stage: "idle", message: "", page_id: null, updated_at: 0 },
+      entries: [],
+      last_id: 0,
+      log_path: "",
+    };
+  },
+  async append_runtime_log(level, source, message, details = "") {
+    return {
+      id: Date.now(),
+      timestamp: Date.now() / 1000,
+      level: level === "error" ? "error" : level === "warning" ? "warning" : level === "debug" ? "debug" : "info",
+      source,
+      message,
+      details,
+    };
+  },
+  async clear_runtime_logs() {
+    return { ok: true };
+  },
   async choose_import_files() {
     return [];
   },
@@ -307,11 +341,38 @@ function api(): Api {
   return window.pywebview?.api || fallbackApi;
 }
 
+function diagnosticLevel(message: string): "warning" | "error" | null {
+  if (/(error|exception|traceback|失败|错误|异常|无法)/i.test(message)) return "error";
+  if (/(warning|warn|警告|未加载|降级|尚未安装|paddleocr)/i.test(message)) return "warning";
+  return null;
+}
+
+function formatLogValue(value: unknown): string {
+  if (value instanceof Error) return value.stack || `${value.name}: ${value.message}`;
+  if (typeof value === "string") return value;
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return String(value);
+  }
+}
+
+function appendFrontendLog(level: "warning" | "error", source: string, message: string, details = "") {
+  void api().append_runtime_log(level, source, message, details).catch(() => undefined);
+}
+
 export function App() {
   const [view, setView] = useState<View>("home");
   const [stats, setStats] = useState({ copybooks: 0, exported_pages: 0 });
-  const [message, setMessage] = useState("");
+  const [message, setMessageState] = useState("");
   const [makerSession, setMakerSession] = useState<MakerSession | null>(null);
+  const [runtimeLogOpen, setRuntimeLogOpen] = useState(false);
+
+  function setMessage(value: string) {
+    setMessageState(value);
+    const level = diagnosticLevel(value);
+    if (level) appendFrontendLog(level, "frontend.ui", value);
+  }
 
   async function refreshStats() {
     setStats(await api().get_home_stats());
@@ -323,9 +384,37 @@ export function App() {
 
   useEffect(() => {
     if (!message) return;
-    const timeout = window.setTimeout(() => setMessage(""), 3600);
+    const timeout = window.setTimeout(() => setMessageState(""), 3600);
     return () => window.clearTimeout(timeout);
   }, [message]);
+
+  useEffect(() => {
+    const originalWarn = console.warn;
+    const originalError = console.error;
+    console.warn = (...values: unknown[]) => {
+      originalWarn(...values);
+      appendFrontendLog("warning", "frontend.console", values.map(formatLogValue).join(" "));
+    };
+    console.error = (...values: unknown[]) => {
+      originalError(...values);
+      appendFrontendLog("error", "frontend.console", values.map(formatLogValue).join(" "));
+    };
+    const handleError = (event: ErrorEvent) => {
+      appendFrontendLog("error", "frontend.window", event.message, event.error?.stack || `${event.filename}:${event.lineno}:${event.colno}`);
+    };
+    const handleRejection = (event: PromiseRejectionEvent) => {
+      const details = formatLogValue(event.reason);
+      appendFrontendLog("error", "frontend.promise", "未处理的 Promise 异常", details);
+    };
+    window.addEventListener("error", handleError);
+    window.addEventListener("unhandledrejection", handleRejection);
+    return () => {
+      console.warn = originalWarn;
+      console.error = originalError;
+      window.removeEventListener("error", handleError);
+      window.removeEventListener("unhandledrejection", handleRejection);
+    };
+  }, []);
 
   return (
     <FluentProvider theme={webLightTheme}>
@@ -342,6 +431,7 @@ export function App() {
           <NavButton icon={<DocumentFolder24Regular />} active={view === "practice"} onClick={() => setView("practice")}>练帖</NavButton>
           <NavButton icon={<Color24Regular />} active={view === "presets"} onClick={() => setView("presets")}>预设</NavButton>
           <div className="navSpacer" />
+          <NavButton icon={<LineHorizontal1Regular />} active={runtimeLogOpen} onClick={() => setRuntimeLogOpen(true)}>运行日志</NavButton>
           <NavButton icon={<Settings24Regular />} active={view === "settings"} onClick={() => setView("settings")}>设置</NavButton>
         </aside>
         <main className="workspace">
@@ -375,6 +465,7 @@ export function App() {
             </MessageBar>
           </div>
         )}
+        <RuntimeLogDialog open={runtimeLogOpen} setMessage={setMessage} onClose={() => setRuntimeLogOpen(false)} />
       </div>
     </FluentProvider>
   );
@@ -386,6 +477,96 @@ function NavButton({ active, icon, children, onClick }: { active: boolean; icon:
       {children}
     </Button>
   );
+}
+
+function RuntimeLogDialog({
+  open,
+  setMessage,
+  onClose,
+}: {
+  open: boolean;
+  setMessage: (value: string) => void;
+  onClose: () => void;
+}) {
+  const [diagnostics, setDiagnostics] = useState<RuntimeDiagnostics | null>(null);
+
+  async function refresh() {
+    setDiagnostics(await api().get_runtime_diagnostics(0));
+  }
+
+  async function clearLogs() {
+    await api().clear_runtime_logs();
+    await refresh();
+    setMessage("运行日志已清空");
+  }
+
+  async function copyLogs() {
+    if (!diagnostics) return;
+    const text = diagnostics.entries.map(formatRuntimeLogEntry).join("\n");
+    await navigator.clipboard.writeText(text);
+    setMessage("运行日志已复制");
+  }
+
+  useEffect(() => {
+    if (!open) return;
+    refresh().catch((error) => setMessage(String(error)));
+    const interval = window.setInterval(() => {
+      refresh().catch(() => undefined);
+    }, 1000);
+    return () => window.clearInterval(interval);
+  }, [open]);
+
+  if (!open) return null;
+  return (
+    <Dialog open>
+      <DialogSurface className="runtimeLogDialogSurface">
+        <DialogBody>
+          <DialogTitle>运行日志</DialogTitle>
+          <DialogContent className="runtimeLogDialogContent">
+            <div className="runtimeLogSummary">
+              <Text size={200}>
+                当前状态：{diagnostics?.status.message || "空闲"}
+              </Text>
+              <Text size={200} className="mutedText">
+                日志文件：{diagnostics?.log_path || "后端尚未连接"}
+              </Text>
+            </div>
+            <div className="runtimeLogEntries">
+              {!diagnostics?.entries.length ? (
+                <div className="centerState compact"><Text>暂无日志</Text></div>
+              ) : diagnostics.entries.map((entry) => (
+                <div key={entry.id} className={`runtimeLogEntry ${entry.level}`}>
+                  <div className="runtimeLogEntryHeader">
+                    <Text size={100}>{formatRuntimeLogTime(entry.timestamp)}</Text>
+                    <Badge appearance="tint" color={entry.level === "error" ? "danger" : entry.level === "warning" ? "warning" : "informative"}>
+                      {entry.level.toUpperCase()}
+                    </Badge>
+                    <Text size={100} weight="semibold">{entry.source}</Text>
+                  </div>
+                  <Text size={200}>{entry.message}</Text>
+                  {entry.details && <pre>{entry.details}</pre>}
+                </div>
+              ))}
+            </div>
+          </DialogContent>
+          <DialogActions>
+            <Button onClick={() => clearLogs().catch((error) => setMessage(String(error)))}>清空</Button>
+            <Button disabled={!diagnostics?.entries.length} onClick={() => copyLogs().catch((error) => setMessage(String(error)))}>复制</Button>
+            <Button appearance="primary" onClick={onClose}>关闭</Button>
+          </DialogActions>
+        </DialogBody>
+      </DialogSurface>
+    </Dialog>
+  );
+}
+
+function formatRuntimeLogTime(timestamp: number) {
+  return new Date(timestamp * 1000).toLocaleTimeString();
+}
+
+function formatRuntimeLogEntry(entry: RuntimeLogEntry) {
+  const timestamp = new Date(entry.timestamp * 1000).toLocaleString();
+  return `${timestamp} [${entry.level.toUpperCase()}] ${entry.source}: ${entry.message}${entry.details ? `\n${entry.details}` : ""}`;
 }
 
 function pageThumbClass(selected: boolean, queued: boolean) {
@@ -1007,6 +1188,7 @@ function Maker({
   const [exporting, setExporting] = useState(false);
   const [analysis, setAnalysis] = useState<PageAnalysis | null>(null);
   const [analyzing, setAnalyzing] = useState(false);
+  const [ocrProgress, setOcrProgress] = useState("正在初始化模型");
   const [savingAnalysis, setSavingAnalysis] = useState(false);
   const [selectionDirty, setSelectionDirty] = useState(false);
   const [hasSavedSelection, setHasSavedSelection] = useState(false);
@@ -1026,6 +1208,7 @@ function Maker({
   async function loadSessionDefaults(pageId: number) {
     const runId = ++loadRunId.current;
     setAnalyzing(true);
+    setOcrProgress("正在初始化模型");
     setAnalysis(null);
     setSelectionDirty(false);
     setHasSavedSelection(false);
@@ -1073,6 +1256,7 @@ function Maker({
   async function recognizePage(force = false) {
     if (!session) return null;
     setAnalyzing(true);
+    setOcrProgress("正在初始化模型");
     try {
       const result = await api().analyze_page(session.pageId, force);
       setAnalysis(result);
@@ -1168,6 +1352,31 @@ function Maker({
     renderPreview(runId).catch((error) => setMessage(String(error)));
   }, [session?.pageId, exportDialogOpen, paramsKey]);
 
+  useEffect(() => {
+    if (!analyzing || !session) return;
+    let active = true;
+    async function refreshOcrProgress() {
+      const diagnostics = await api().get_runtime_diagnostics(0);
+      const status = diagnostics.status;
+      if (
+        active
+        && status.operation === "ocr"
+        && status.page_id === session?.pageId
+        && status.message
+      ) {
+        setOcrProgress(status.message);
+      }
+    }
+    refreshOcrProgress().catch(() => undefined);
+    const interval = window.setInterval(() => {
+      refreshOcrProgress().catch(() => undefined);
+    }, 300);
+    return () => {
+      active = false;
+      window.clearInterval(interval);
+    };
+  }, [analyzing, session?.pageId]);
+
   return (
     <section className="makeWorkbench">
       <div className="makeTopbar">
@@ -1186,7 +1395,7 @@ function Maker({
           </Text>
         </div>
         <Button icon={<LineHorizontal1Regular />} disabled={!session || analyzing || savingAnalysis} onClick={() => recognizePage(true)}>
-          {analyzing ? "识别中" : "重新识别"}
+          {analyzing ? ocrProgress : "重新识别"}
         </Button>
         <Button appearance="primary" icon={<DocumentPdf24Regular />} disabled={!session || !canExport} onClick={openExportDialog}>导出</Button>
       </div>
@@ -1199,7 +1408,7 @@ function Maker({
           </div>
         ) : analyzing && !analysis ? (
           <div className="centerState">
-            <Spinner label="正在识别当前页，首次使用会下载本地 OCR 模型" />
+            <Spinner label={`${ocrProgress}；首次使用可能需要下载本地 OCR 模型`} />
           </div>
         ) : analysis ? (
           <SelectionWorkspace

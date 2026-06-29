@@ -1,18 +1,54 @@
 from __future__ import annotations
 
+import functools
+import platform
+import sys
 from pathlib import Path
 from typing import Any
 
 import fitz
 import webview
 
+from linmo.runtime import (
+    add_runtime_log,
+    clear_runtime_logs,
+    configure_runtime_logging,
+    get_runtime_diagnostics,
+    log_exception,
+)
+
 from .paths import AppPaths, default_app_paths
 from .services import LinmoServices, file_to_data_url
 
 
+def _log_public_api_errors(cls):
+    excluded = {"append_runtime_log", "get_runtime_diagnostics", "clear_runtime_logs"}
+    for name, method in list(vars(cls).items()):
+        if name.startswith("_") or name in excluded or not callable(method):
+            continue
+
+        @functools.wraps(method)
+        def wrapped(self, *args, __method=method, __name=name, **kwargs):
+            try:
+                return __method(self, *args, **kwargs)
+            except Exception as exc:
+                log_exception("backend.api", f"API {__name} 执行失败", exc)
+                raise
+
+        setattr(cls, name, wrapped)
+    return cls
+
+
+@_log_public_api_errors
 class LinmoApi:
     def __init__(self, paths: AppPaths | None = None):
         self.paths = paths or default_app_paths()
+        configure_runtime_logging(self.paths.logs_dir / "linmo.log")
+        add_runtime_log(
+            "info",
+            "backend.startup",
+            f"Linmo 启动：{platform.platform()}，Python {platform.python_version()}，可执行文件 {sys.executable}",
+        )
         self.services = LinmoServices(self.paths)
         self.services.repo.clear_queue_items()
 
@@ -182,6 +218,25 @@ class LinmoApi:
 
     def update_settings(self, settings: dict[str, Any]) -> dict[str, str]:
         return self.services.repo.update_settings(settings)
+
+    def get_runtime_diagnostics(self, since_id: int = 0) -> dict[str, Any]:
+        return get_runtime_diagnostics(int(since_id))
+
+    def append_runtime_log(
+        self,
+        level: str,
+        source: str,
+        message: str,
+        details: str = "",
+    ) -> dict[str, Any]:
+        normalized_source = str(source or "app")
+        if not normalized_source.startswith("frontend"):
+            normalized_source = f"frontend.{normalized_source}"
+        return add_runtime_log(level, normalized_source, message, details, echo=False)
+
+    def clear_runtime_logs(self) -> dict[str, bool]:
+        clear_runtime_logs()
+        return {"ok": True}
 
     def choose_import_files(self) -> list[str]:
         return _open_file_dialog(allow_multiple=True)

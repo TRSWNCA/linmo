@@ -6,10 +6,12 @@ import os
 import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Callable, Protocol
 
 import numpy as np
 from PIL import Image, ImageDraw, ImageFilter
+
+from .runtime import add_runtime_log, log_exception
 
 
 ANALYSIS_VERSION = 1
@@ -89,22 +91,48 @@ def source_fingerprint(image: Image.Image) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
-def analyze_page(image: Image.Image, engine: OcrEngine | None = None) -> dict[str, Any]:
+def analyze_page(
+    image: Image.Image,
+    engine: OcrEngine | None = None,
+    progress: Callable[[str, str], None] | None = None,
+) -> dict[str, Any]:
     """Analyze a page with local OCR, using a visible low-confidence fallback.
 
     The fallback exists for unsupported installations and tests. It never claims
     character semantics: every detected glyph is represented by ``□``.
     """
 
-    if engine is not None:
-        analysis = engine.analyze(image)
-    elif os.environ.get("LINMO_DISABLE_OCR") == "1":
+    if os.environ.get("LINMO_DISABLE_OCR") == "1" and engine is None:
+        if progress:
+            progress("fallback", "OCR 已禁用，正在使用降级定位")
         analysis = _fallback_analysis(image)
     else:
         try:
-            analysis = _default_ocr_engine().analyze(image)
-        except (RuntimeError, OSError):
+            selected_engine = engine
+            if selected_engine is None:
+                if _DEFAULT_OCR_ENGINE is None:
+                    if progress:
+                        progress("initializing_model", "正在初始化模型")
+                    add_runtime_log("info", "backend.ocr", f"开始初始化 PaddleOCR 模型 {OCR_MODEL_ID}")
+                selected_engine = _default_ocr_engine()
+            if progress:
+                progress("recognizing", "正在识别")
+            add_runtime_log(
+                "info",
+                "backend.ocr",
+                f"开始识别图像，尺寸 {image.width}x{image.height}，模型 {selected_engine.model_id}",
+            )
+            analysis = selected_engine.analyze(image)
+            glyph_count = sum(len(group.get("glyphs", [])) for group in analysis.get("groups", []))
+            add_runtime_log("info", "backend.ocr", f"识别完成：{len(analysis.get('groups', []))} 行，{glyph_count} 字")
+        except Exception as exc:
+            log_exception("backend.ocr", "PaddleOCR 初始化或识别失败，切换到降级定位", exc)
             analysis = _fallback_analysis(image)
+            analysis["warning"] = (
+                f"PaddleOCR 初始化或识别失败，已使用降级定位：{type(exc).__name__}: {exc}"
+            )
+            if progress:
+                progress("fallback", "PaddleOCR 加载失败，已使用降级定位")
     analysis["version"] = ANALYSIS_VERSION
     analysis["dpi"] = int(analysis.get("dpi", 300))
     analysis["image_size"] = [image.width, image.height]

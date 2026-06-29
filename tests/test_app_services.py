@@ -254,6 +254,10 @@ class AppServicesTests(unittest.TestCase):
             source = root / "sample.png"
             _make_ruled_image(source)
             api = LinmoApi(AppPaths(root / "data"))
+            api.append_runtime_log("warning", "frontend.test", "test warning")
+            diagnostics = api.get_runtime_diagnostics()
+            self.assertTrue(diagnostics["log_path"].endswith("logs/linmo.log"))
+            self.assertTrue(any(entry["message"] == "test warning" for entry in diagnostics["entries"]))
 
             imported = api.import_copybooks([str(source)])
             page = api.list_pages(imported[0]["id"])[0]

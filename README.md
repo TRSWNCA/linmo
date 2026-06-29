@@ -171,6 +171,18 @@ pywebview 调试默认关闭。需要 Chromium 远程调试时：
 LINMO_WEBVIEW_DEBUG=1 uv run linmo-app
 ```
 
+## 运行日志与 OCR 排查
+
+左侧导航的“运行日志”会显示前端和后端的 warning/error、OCR 当前阶段及完整异常堆栈。日志可以复制，也会持续写入数据目录下的：
+
+```text
+logs/linmo.log
+```
+
+日志面板顶部会显示实际文件路径。默认数据目录是 `~/.local/share/linmo`；如果设置了 `LINMO_APP_DATA`，则使用该目录。Windows 上遇到 PaddleOCR 未加载时，重点查看 `backend.ocr` 的 error 项，其中会保留缺失 DLL、Python 包导入失败或模型初始化失败的原始异常。
+
+OCR 过程会依次显示“正在读取页面”“正在初始化模型”“正在识别”。命中已有缓存时显示“正在读取识别缓存”。
+
 ## 数据与隐私
 
 Linmo 默认把导入的书帖、练帖阁 PDF、缩略图、预设、导出记录和设置保存在：

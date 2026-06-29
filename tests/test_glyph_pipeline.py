@@ -8,6 +8,7 @@ from PIL import Image, ImageDraw
 from linmo.glyph_pipeline import (
     GridParams,
     _extract_glyph,
+    analyze_page,
     analysis_from_ocr_payload,
     render_practice_pages,
     update_analysis,
@@ -15,6 +16,25 @@ from linmo.glyph_pipeline import (
 
 
 class GlyphPipelineTests(unittest.TestCase):
+    def test_ocr_failure_reports_reason_and_progress_before_fallback(self) -> None:
+        class FailingEngine:
+            model_id = "failing-test-engine"
+
+            def analyze(self, image: Image.Image) -> dict:
+                raise RuntimeError("missing paddle DLL")
+
+        progress: list[tuple[str, str]] = []
+        analysis = analyze_page(
+            Image.new("RGB", (120, 80), "white"),
+            engine=FailingEngine(),
+            progress=lambda stage, message: progress.append((stage, message)),
+        )
+
+        self.assertEqual(analysis["engine"], "fallback")
+        self.assertIn("missing paddle DLL", analysis["warning"])
+        self.assertEqual(progress[0][0], "recognizing")
+        self.assertEqual(progress[-1][0], "fallback")
+
     def test_ocr_line_is_split_into_character_boxes_and_punctuation(self) -> None:
         analysis = analysis_from_ocr_payload(
             {

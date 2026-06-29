@@ -778,6 +778,72 @@ textarea {
   height: min(900px, calc(100vh - 48px));
 }
 
+.runtimeLogDialogSurface {
+  width: min(1080px, calc(100vw - 48px));
+  max-width: none;
+  height: min(820px, calc(100vh - 48px));
+}
+
+.runtimeLogDialogContent {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  gap: 12px;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.runtimeLogSummary {
+  display: grid;
+  gap: 4px;
+}
+
+.runtimeLogEntries {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-height: 0;
+  padding: 8px;
+  border: 1px solid #e0e0e0;
+  border-radius: 8px;
+  background: #f7f7f7;
+  overflow: auto;
+}
+
+.runtimeLogEntry {
+  display: grid;
+  gap: 5px;
+  padding: 9px 10px;
+  border-left: 3px solid #8a8886;
+  border-radius: 4px;
+  background: #ffffff;
+}
+
+.runtimeLogEntry.warning {
+  border-left-color: #f7630c;
+}
+
+.runtimeLogEntry.error {
+  border-left-color: #d13438;
+}
+
+.runtimeLogEntryHeader {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.runtimeLogEntry pre {
+  max-height: 240px;
+  margin: 0;
+  padding: 8px;
+  border-radius: 4px;
+  color: #3b3a39;
+  background: #f3f2f1;
+  font: 11px/1.45 Consolas, "Cascadia Mono", monospace;
+  white-space: pre-wrap;
+  overflow: auto;
+}
+
 .exportDialogContent {
   min-height: 0;
   display: grid;
@@ -1001,6 +1067,11 @@ textarea {
   }
 
   .exportDialogSurface {
+    width: calc(100vw - 20px);
+    height: calc(100vh - 20px);
+  }
+
+  .runtimeLogDialogSurface {
     width: calc(100vw - 20px);
     height: calc(100vh - 20px);
   }
