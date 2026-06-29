@@ -50,6 +50,12 @@ class LinmoApi:
     def list_pages(self, copybook_id: int) -> list[dict[str, Any]]:
         return self.services.repo.list_pages(copybook_id)
 
+    def get_page_detail(self, page_id: int) -> dict[str, Any]:
+        return self.services.get_page_detail(int(page_id))
+
+    def update_page_crop(self, page_id: int, metadata: dict[str, Any]) -> dict[str, Any]:
+        return self.services.update_page_crop(int(page_id), metadata)
+
     def get_page_thumbnail(self, page_id: int) -> str:
         return file_to_data_url(self.services.create_thumbnail(page_id))
 
@@ -59,6 +65,31 @@ class LinmoApi:
     def get_copybook_cover(self, copybook_id: int) -> str:
         path = self.services.copybook_cover(copybook_id)
         return file_to_data_url(path) if path else ""
+
+    def render_page_previews(self, page_id: int, params: dict[str, Any]) -> list[str]:
+        return [
+            file_to_data_url(path)
+            for path in self.services.render_page_previews(int(page_id), params)
+        ]
+
+    def analyze_page(self, page_id: int, force: bool = False) -> dict[str, Any]:
+        return self.services.analyze_page(int(page_id), bool(force))
+
+    def update_page_analysis(
+        self,
+        page_id: int,
+        groups: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        return self.services.update_page_analysis(int(page_id), groups)
+
+    def export_page_to_generated_post(
+        self,
+        page_id: int,
+        params: dict[str, Any],
+        name: str,
+        output_format: str = "pdf",
+    ) -> dict[str, Any]:
+        return self.services.export_page_to_generated_post(int(page_id), params, name, output_format)
 
     def add_pages_to_queue(self, page_ids: list[int]) -> list[dict[str, Any]]:
         items = []

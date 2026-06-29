@@ -109,6 +109,7 @@ def analyze_page(image: Image.Image, engine: OcrEngine | None = None) -> dict[st
     analysis["dpi"] = int(analysis.get("dpi", 300))
     analysis["image_size"] = [image.width, image.height]
     analysis["source_fingerprint"] = source_fingerprint(image)
+    analysis.setdefault("selection_mode", "ocr_groups")
     _normalize_analysis(analysis)
     return analysis
 
@@ -181,6 +182,7 @@ def analysis_from_ocr_payload(
         "model_id": model_id,
         "engine": "paddleocr",
         "status": "ready",
+        "selection_mode": "ocr_groups",
         "image_size": [image_size[0], image_size[1]],
         "groups": groups,
     }
@@ -235,6 +237,7 @@ def update_analysis(
     updated = dict(analysis)
     if groups is not None:
         updated["groups"] = groups
+    updated.setdefault("selection_mode", "ocr_groups")
     _normalize_analysis(updated)
     updated["status"] = "reviewed"
     return updated
@@ -323,6 +326,7 @@ def _fallback_analysis(image: Image.Image) -> dict[str, Any]:
         "model_id": "fallback-layout-only",
         "engine": "fallback",
         "status": "needs_ocr",
+        "selection_mode": "ocr_groups",
         "warning": "未加载 PaddleOCR，当前仅提供低置信度字形定位",
         "groups": groups,
     }
@@ -418,6 +422,7 @@ def _sort_groups(analysis: dict[str, Any]) -> None:
 
 
 def _normalize_analysis(analysis: dict[str, Any]) -> None:
+    analysis.setdefault("selection_mode", "ocr_groups")
     for group_index, group in enumerate(analysis.get("groups", [])):
         group.setdefault("id", f"line-{group_index + 1}")
         group.setdefault("direction", "horizontal")
@@ -435,28 +440,45 @@ def _normalize_analysis(analysis: dict[str, Any]) -> None:
 
 
 def _renderable_lines(analysis: dict[str, Any]) -> list[list[dict[str, Any]]]:
+    if analysis.get("selection_mode") == "ordered_stream":
+        ordered_glyphs: list[dict[str, Any]] = []
+        for group in analysis.get("groups", []):
+            if not group.get("included", True):
+                continue
+            ordered_glyphs.extend(
+                glyph for glyph in group.get("glyphs", [])
+                if glyph.get("included", True)
+            )
+        line = _renderable_line(ordered_glyphs)
+        return [line] if line else []
+
     lines = []
     for group in analysis.get("groups", []):
         if not group.get("included", True):
             continue
         glyphs = [glyph for glyph in group.get("glyphs", []) if glyph.get("included", True)]
-        output: list[dict[str, Any]] = []
-        pending_prefix: list[int] | None = None
-        for glyph in glyphs:
-            bbox = list(glyph["bbox"])
-            if glyph.get("kind") == "punctuation":
-                if _is_opening_punctuation(str(glyph.get("text", ""))):
-                    pending_prefix = _union_bbox(pending_prefix, bbox)
-                elif output:
-                    output[-1]["bbox"] = _union_bbox(output[-1]["bbox"], bbox)
-                continue
-            if pending_prefix is not None:
-                bbox = _union_bbox(pending_prefix, bbox)
-                pending_prefix = None
-            output.append({"text": glyph.get("text", "□"), "bbox": bbox})
+        output = _renderable_line(glyphs)
         if output:
             lines.append(output)
     return lines
+
+
+def _renderable_line(glyphs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    output: list[dict[str, Any]] = []
+    pending_prefix: list[int] | None = None
+    for glyph in glyphs:
+        bbox = list(glyph["bbox"])
+        if glyph.get("kind") == "punctuation":
+            if _is_opening_punctuation(str(glyph.get("text", ""))):
+                pending_prefix = _union_bbox(pending_prefix, bbox)
+            elif output:
+                output[-1]["bbox"] = _union_bbox(output[-1]["bbox"], bbox)
+            continue
+        if pending_prefix is not None:
+            bbox = _union_bbox(pending_prefix, bbox)
+            pending_prefix = None
+        output.append({"text": glyph.get("text", "□"), "bbox": bbox})
+    return output
 
 
 def _paste_glyph(
@@ -518,8 +540,16 @@ def _extract_glyph(crop: Image.Image) -> tuple[Image.Image, Image.Image]:
     alpha = np.clip(
         (distance.astype(np.int32) - threshold) * 255 / scale, 0, 255
     ).astype(np.uint8)
-    alpha_image = Image.fromarray(alpha, "L")
-    texture = np.clip(250 - distance * 2, 20, 250).astype(np.uint8)
+    # Drop weak near-background pixels aggressively; residual paper tint is worse than
+    # a slightly thinner stroke for practice sheets.
+    low_alpha_cutoff = max(28, min(72, threshold * 2))
+    alpha = np.where(alpha >= low_alpha_cutoff, alpha, 0).astype(np.uint8)
+    alpha_image = (
+        Image.fromarray(alpha, "L")
+        .filter(ImageFilter.MaxFilter(3))
+        .filter(ImageFilter.MinFilter(3))
+    )
+    texture = np.clip(gray - np.maximum(distance // 3, 0), 0, 235).astype(np.uint8)
     return alpha_image, Image.fromarray(texture, "L")
 
 

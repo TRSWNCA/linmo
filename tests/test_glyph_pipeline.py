@@ -7,6 +7,7 @@ from PIL import Image, ImageDraw
 
 from linmo.glyph_pipeline import (
     GridParams,
+    _extract_glyph,
     analysis_from_ocr_payload,
     render_practice_pages,
     update_analysis,
@@ -122,6 +123,70 @@ class GlyphPipelineTests(unittest.TestCase):
 
         self.assertEqual(updated["status"], "reviewed")
         self.assertEqual(updated["groups"][0]["glyphs"][0]["text"], "改")
+
+    def test_ordered_stream_renders_selected_glyphs_in_saved_order(self) -> None:
+        source = Image.new("RGB", (320, 180), "white")
+        draw = ImageDraw.Draw(source)
+        draw.rectangle((20, 30, 70, 120), fill="black")
+        draw.rectangle((120, 30, 170, 120), fill="black")
+        draw.rectangle((220, 30, 270, 120), fill="black")
+        analysis = {
+            "version": 1,
+            "model_id": "test",
+            "engine": "test",
+            "status": "reviewed",
+            "selection_mode": "ordered_stream",
+            "image_size": [320, 180],
+            "groups": [
+                {
+                    "id": "selected",
+                    "direction": "horizontal",
+                    "included": True,
+                    "glyphs": [
+                        {"id": "g3", "text": "丙", "confidence": 1, "bbox": [220, 30, 270, 120], "included": True, "kind": "character"},
+                        {"id": "g1", "text": "甲", "confidence": 1, "bbox": [20, 30, 70, 120], "included": True, "kind": "character"},
+                    ],
+                }
+            ],
+        }
+
+        pages = render_practice_pages(
+            source,
+            analysis,
+            GridParams(grid_style="tian", cell_size_mm=15, margin_mm=15, dpi=72),
+        )
+
+        self.assertEqual(len(pages), 1)
+        cell = round(15 / 25.4 * 72)
+        margin = round(15 / 25.4 * 72)
+        first = np.asarray(
+            pages[0].convert("L").crop((margin, margin, margin + cell, margin + cell))
+        )
+        second = np.asarray(
+            pages[0].convert("L").crop((margin + cell, margin, margin + cell * 2, margin + cell))
+        )
+        self.assertGreater(int((first < 140).sum()), 0)
+        self.assertGreater(int((second < 140).sum()), 0)
+
+    def test_extract_glyph_clears_light_background_haze(self) -> None:
+        crop = Image.new("L", (48, 48), 236)
+        draw = ImageDraw.Draw(crop)
+        for x in range(48):
+            draw.point((x, 0), fill=232)
+            draw.point((x, 47), fill=238)
+        for y in range(48):
+            draw.point((0, y), fill=234)
+            draw.point((47, y), fill=237)
+        draw.rectangle((14, 10, 33, 37), fill=24)
+
+        alpha, ink = _extract_glyph(crop)
+        alpha_pixels = np.asarray(alpha)
+        ink_pixels = np.asarray(ink)
+
+        self.assertEqual(int(alpha_pixels[2, 2]), 0)
+        self.assertEqual(int(alpha_pixels[45, 45]), 0)
+        self.assertGreater(int(alpha_pixels[24, 24]), 180)
+        self.assertLess(int(ink_pixels[24, 24]), 80)
 
 
 def _analysis(count: int) -> dict:

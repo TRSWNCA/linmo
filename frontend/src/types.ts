@@ -7,6 +7,10 @@ export type Copybook = {
   cover_path: string;
   tags: string;
   notes: string;
+  crop_left_ratio: number;
+  crop_right_ratio: number;
+  crop_top_ratio: number;
+  crop_bottom_ratio: number;
   page_count?: number;
 };
 
@@ -16,6 +20,19 @@ export type Page = {
   page_no: number;
   width: number;
   height: number;
+};
+
+export type PageDetail = Page & {
+  copybook_title: string;
+  crop_left_ratio: number;
+  crop_right_ratio: number;
+  crop_top_ratio: number;
+  crop_bottom_ratio: number;
+  page_crop_left_ratio?: number;
+  page_crop_right_ratio?: number;
+  page_crop_top_ratio?: number;
+  page_crop_bottom_ratio?: number;
+  page_crop_override?: number;
 };
 
 export type QueueItem = {
@@ -49,8 +66,10 @@ export type PageAnalysis = {
   engine: string;
   status: string;
   warning?: string;
+  selection_mode?: "ocr_groups" | "ordered_stream";
   image_size: [number, number];
   groups: GlyphGroup[];
+  ocr_groups?: GlyphGroup[];
 };
 
 export type Preset = {
@@ -92,9 +111,20 @@ export type Api = {
   import_copybooks(paths: string[]): Promise<Copybook[]>;
   update_copybook_metadata(copybook_id: number, metadata: Partial<Copybook> & { cover_source_path?: string }): Promise<Copybook>;
   list_pages(copybook_id: number): Promise<Page[]>;
+  get_page_detail(page_id: number): Promise<PageDetail>;
+  update_page_crop(page_id: number, metadata: {
+    crop_left_ratio: number;
+    crop_right_ratio: number;
+    crop_top_ratio: number;
+    crop_bottom_ratio: number;
+  }): Promise<PageDetail>;
   get_copybook_cover(copybook_id: number): Promise<string>;
   get_page_thumbnail(page_id: number): Promise<string>;
   get_page_preview(page_id: number): Promise<string>;
+  render_page_previews(page_id: number, params: Record<string, unknown>): Promise<string[]>;
+  analyze_page(page_id: number, force?: boolean): Promise<PageAnalysis>;
+  update_page_analysis(page_id: number, groups: GlyphGroup[]): Promise<PageAnalysis>;
+  export_page_to_generated_post(page_id: number, params: Record<string, unknown>, name: string, output_format?: "pdf" | "png"): Promise<GeneratedPost>;
   add_pages_to_queue(page_ids: number[]): Promise<QueueItem[]>;
   list_queue_items(): Promise<QueueItem[]>;
   update_queue_item(item_id: number, params: Record<string, unknown>): Promise<QueueItem>;
