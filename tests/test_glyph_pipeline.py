@@ -67,6 +67,30 @@ class GlyphPipelineTests(unittest.TestCase):
             [[14, 22, 63, 88], [76, 21, 146, 89]],
         )
 
+    def test_refines_uneven_character_spacing_from_ink_projection(self) -> None:
+        image = Image.new("RGB", (240, 100), "white")
+        draw = ImageDraw.Draw(image)
+        draw.rectangle((8, 20, 95, 82), fill="black")
+        draw.rectangle((110, 30, 130, 76), fill="black")
+        draw.rectangle((180, 16, 228, 88), fill="black")
+
+        analysis = analysis_from_ocr_payload(
+            {
+                "rec_texts": ["甲乙丙"],
+                "rec_scores": [0.96],
+                "rec_polys": [[[0, 10], [239, 10], [239, 95], [0, 95]]],
+            },
+            image.size,
+            image=image,
+        )
+
+        boxes = [glyph["bbox"] for glyph in analysis["groups"][0]["glyphs"]]
+        self.assertGreaterEqual(boxes[0][2], 95)
+        self.assertGreaterEqual(boxes[1][0], 108)
+        self.assertLessEqual(boxes[1][2], 134)
+        self.assertGreaterEqual(boxes[2][0], 178)
+        self.assertGreater(boxes[0][2] - boxes[0][0], boxes[1][2] - boxes[1][0] + 40)
+
     def test_vertical_groups_are_ordered_right_to_left(self) -> None:
         analysis = analysis_from_ocr_payload(
             {
@@ -85,6 +109,29 @@ class GlyphPipelineTests(unittest.TestCase):
             ["甲", "丙"],
         )
         self.assertTrue(all(group["direction"] == "vertical" for group in analysis["groups"]))
+
+    def test_refines_uneven_vertical_character_spacing(self) -> None:
+        image = Image.new("RGB", (100, 240), "white")
+        draw = ImageDraw.Draw(image)
+        draw.rectangle((20, 8, 82, 95), fill="black")
+        draw.rectangle((30, 110, 76, 130), fill="black")
+        draw.rectangle((16, 180, 88, 228), fill="black")
+
+        analysis = analysis_from_ocr_payload(
+            {
+                "rec_texts": ["甲乙丙"],
+                "rec_scores": [0.96],
+                "rec_polys": [[[10, 0], [95, 0], [95, 239], [10, 239]]],
+            },
+            image.size,
+            image=image,
+        )
+
+        boxes = [glyph["bbox"] for glyph in analysis["groups"][0]["glyphs"]]
+        self.assertGreaterEqual(boxes[0][3], 95)
+        self.assertGreaterEqual(boxes[1][1], 108)
+        self.assertLessEqual(boxes[1][3], 134)
+        self.assertGreaterEqual(boxes[2][1], 178)
 
     def test_renders_a4_example_and_blank_grid_rows(self) -> None:
         source = Image.new("RGB", (500, 180), "white")
@@ -133,6 +180,49 @@ class GlyphPipelineTests(unittest.TestCase):
         )
 
         self.assertGreater(len(pages), 1)
+
+    def test_rendering_preserves_relative_glyph_sizes(self) -> None:
+        source = Image.new("RGB", (180, 120), "white")
+        draw = ImageDraw.Draw(source)
+        draw.rectangle((20, 45, 39, 74), fill="black")
+        draw.rectangle((80, 20, 129, 89), fill="black")
+        analysis = {
+            "version": 1,
+            "model_id": "test",
+            "engine": "test",
+            "status": "ready",
+            "image_size": [180, 120],
+            "groups": [
+                {
+                    "id": "line-1",
+                    "direction": "horizontal",
+                    "included": True,
+                    "glyphs": [
+                        {"id": "small", "text": "小", "confidence": 1, "bbox": [20, 45, 40, 75], "included": True, "kind": "character"},
+                        {"id": "large", "text": "大", "confidence": 1, "bbox": [80, 20, 130, 90], "included": True, "kind": "character"},
+                    ],
+                }
+            ],
+        }
+
+        page = render_practice_pages(
+            source,
+            analysis,
+            GridParams(cell_size_mm=15, margin_mm=15, dpi=72),
+        )[0].convert("L")
+        cell = round(15 / 25.4 * 72)
+        margin = round(15 / 25.4 * 72)
+        small = np.asarray(page.crop((margin, margin, margin + cell, margin + cell)))
+        large = np.asarray(page.crop((margin + cell, margin, margin + cell * 2, margin + cell)))
+        small_ys, small_xs = np.nonzero(small < 100)
+        large_ys, large_xs = np.nonzero(large < 100)
+        small_height = int(small_ys.max() - small_ys.min() + 1)
+        large_height = int(large_ys.max() - large_ys.min() + 1)
+        small_width = int(small_xs.max() - small_xs.min() + 1)
+        large_width = int(large_xs.max() - large_xs.min() + 1)
+
+        self.assertGreater(large_height, small_height * 1.5)
+        self.assertGreater(large_width, small_width * 1.5)
 
     def test_manual_update_marks_analysis_reviewed(self) -> None:
         analysis = _analysis(2)

@@ -14,7 +14,7 @@ from PIL import Image, ImageDraw, ImageFilter
 from .runtime import add_runtime_log, log_exception
 
 
-ANALYSIS_VERSION = 1
+ANALYSIS_VERSION = 2
 OCR_MODEL_ID = "PP-OCRv6_medium"
 
 
@@ -81,7 +81,7 @@ class PaddleOcrEngine:
         if not raw_results:
             return _empty_analysis(self.model_id)
         payload = _result_payload(raw_results[0])
-        return analysis_from_ocr_payload(payload, image.size, self.model_id)
+        return analysis_from_ocr_payload(payload, image.size, self.model_id, image=image)
 
 
 def source_fingerprint(image: Image.Image) -> str:
@@ -153,6 +153,8 @@ def analysis_from_ocr_payload(
     payload: dict[str, Any],
     image_size: tuple[int, int],
     model_id: str = OCR_MODEL_ID,
+    *,
+    image: Image.Image | None = None,
 ) -> dict[str, Any]:
     raw_texts = _first_present(payload, "rec_texts", "texts")
     raw_scores = _first_present(payload, "rec_scores", "scores")
@@ -182,7 +184,7 @@ def analysis_from_ocr_payload(
         boxes_for_line = word_boxes[line_index] if line_index < len(word_boxes) else None
         raw_tokens = text_words[line_index] if line_index < len(text_words) else None
         tokens = [str(token) for token in raw_tokens] if raw_tokens else list(str(text))
-        char_boxes = _character_boxes(tokens, line_poly, boxes_for_line, direction)
+        char_boxes = _character_boxes(tokens, line_poly, boxes_for_line, direction, image=image)
         glyphs = []
         for char_index, (char, box) in enumerate(zip(tokens, char_boxes)):
             glyphs.append(
@@ -236,6 +238,7 @@ def render_practice_pages(
     logical_lines = _renderable_lines(analysis)
     if not logical_lines:
         raise ValueError("没有可排版的正文字符；请先检查识别与正文选择")
+    glyph_scale = _common_glyph_scale(logical_lines, cell)
 
     pages: list[Image.Image] = []
     page = Image.new("RGB", (page_width, page_height), "white")
@@ -251,7 +254,7 @@ def render_practice_pages(
                 x = margin + index * cell
                 _draw_grid(page, (x, y), cell, params.grid_style)
                 _draw_grid(page, (x, y + cell), cell, params.grid_style)
-                _paste_glyph(page, source, glyph["bbox"], (x, y), cell)
+                _paste_glyph(page, source, glyph["bbox"], (x, y), cell, glyph_scale)
             y += pair_height
     pages.append(page)
     return pages
@@ -515,6 +518,7 @@ def _paste_glyph(
     bbox: list[int],
     origin: tuple[int, int],
     cell: int,
+    common_scale: float,
 ) -> None:
     left, top, right, bottom = bbox
     width, height = right - left, bottom - top
@@ -527,14 +531,32 @@ def _paste_glyph(
     )
     crop = source.crop(crop_box).convert("L")
     alpha, ink = _extract_glyph(crop)
-    max_size = round(cell * 0.80)
-    scale = min(max_size / max(1, crop.width), max_size / max(1, crop.height))
+    max_size = round(cell * 0.92)
+    scale = min(
+        common_scale,
+        max_size / max(1, crop.width),
+        max_size / max(1, crop.height),
+    )
     size = (max(1, round(crop.width * scale)), max(1, round(crop.height * scale)))
     alpha = alpha.resize(size, Image.Resampling.LANCZOS)
     ink = ink.resize(size, Image.Resampling.LANCZOS).convert("RGB")
     x = origin[0] + (cell - size[0]) // 2
     y = origin[1] + (cell - size[1]) // 2
     output.paste(ink, (x, y), alpha)
+
+
+def _common_glyph_scale(logical_lines: list[list[dict[str, Any]]], cell: int) -> float:
+    extents = []
+    for line in logical_lines:
+        for glyph in line:
+            left, top, right, bottom = glyph["bbox"]
+            extent = max(right - left, bottom - top)
+            if extent > 0:
+                extents.append(extent)
+    if not extents:
+        return 1.0
+    reference = float(np.percentile(extents, 90))
+    return max(0.01, cell * 0.80 / max(1.0, reference))
 
 
 def _extract_glyph(crop: Image.Image) -> tuple[Image.Image, Image.Image]:
@@ -632,6 +654,8 @@ def _character_boxes(
     line_poly: list[list[int]],
     raw_boxes: Any,
     direction: str,
+    *,
+    image: Image.Image | None = None,
 ) -> list[list[list[int]]]:
     parsed = []
     if isinstance(raw_boxes, (list, tuple)):
@@ -639,8 +663,32 @@ def _character_boxes(
             polygon = _as_polygon(raw)
             if polygon is not None:
                 parsed.append(polygon)
-    if len(parsed) == len(tokens):
-        return parsed
+    initial = parsed if len(parsed) == len(tokens) else _equal_character_boxes(tokens, line_poly, direction)
+    if image is None or len(tokens) <= 1:
+        return initial
+    try:
+        return _refine_character_boxes_from_ink(
+            tokens,
+            line_poly,
+            initial,
+            direction,
+            image,
+        )
+    except Exception as exc:
+        add_runtime_log(
+            "warning",
+            "backend.segmentation",
+            f"笔墨边界细化失败，保留 OCR 字框：{type(exc).__name__}: {exc}",
+            echo=False,
+        )
+        return initial
+
+
+def _equal_character_boxes(
+    tokens: list[str],
+    line_poly: list[list[int]],
+    direction: str,
+) -> list[list[list[int]]]:
     left, top, right, bottom = _polygon_bbox(line_poly, None)
     count = max(1, len(tokens))
     if direction == "vertical":
@@ -658,6 +706,188 @@ def _character_boxes(
          [round(left + i * (right - left) / count), bottom]]
         for i in range(count)
     ]
+
+
+def _refine_character_boxes_from_ink(
+    tokens: list[str],
+    line_poly: list[list[int]],
+    initial_boxes: list[list[list[int]]],
+    direction: str,
+    image: Image.Image,
+) -> list[list[list[int]]]:
+    left, top, right, bottom = _polygon_bbox(line_poly, image.size)
+    if right - left < 2 or bottom - top < 2:
+        return initial_boxes
+    crop = image.crop((left, top, right, bottom)).convert("L")
+    ink = _line_ink_mask(crop)
+    vertical = direction == "vertical"
+    projection = ink.sum(axis=1 if vertical else 0).astype(np.float64)
+    if not projection.size or not np.any(projection):
+        return initial_boxes
+    projection = np.convolve(projection, np.array([1, 2, 3, 2, 1], dtype=np.float64) / 9, mode="same")
+    axis_start = top if vertical else left
+    axis_end = bottom if vertical else right
+    raw_anchors = []
+    for previous, following in zip(initial_boxes, initial_boxes[1:]):
+        previous_box = _polygon_bbox(previous, None)
+        following_box = _polygon_bbox(following, None)
+        previous_end = previous_box[3] if vertical else previous_box[2]
+        following_start = following_box[1] if vertical else following_box[0]
+        raw_anchors.append((previous_end + following_start) / 2 - axis_start)
+    boundaries = _projection_boundaries(
+        projection,
+        len(tokens),
+        raw_anchors,
+        cross_size=(right - left) if vertical else (bottom - top),
+    )
+    axis_boundaries = [0, *boundaries, axis_end - axis_start]
+    refined = []
+    nominal = (axis_end - axis_start) / max(1, len(tokens))
+    padding = max(1, round(nominal * 0.025))
+    for index in range(len(tokens)):
+        segment_start = int(axis_boundaries[index])
+        segment_end = int(axis_boundaries[index + 1])
+        if segment_end <= segment_start:
+            refined.append(initial_boxes[index])
+            continue
+        segment = ink[segment_start:segment_end, :] if vertical else ink[:, segment_start:segment_end]
+        ys, xs = np.nonzero(segment)
+        if not len(xs):
+            refined.append(initial_boxes[index])
+            continue
+        if vertical:
+            box_left = max(left, left + int(xs.min()) - padding)
+            box_right = min(right, left + int(xs.max()) + 1 + padding)
+            box_top = max(top + segment_start, top + segment_start + int(ys.min()) - padding)
+            box_bottom = min(top + segment_end, top + segment_start + int(ys.max()) + 1 + padding)
+        else:
+            box_left = max(left + segment_start, left + segment_start + int(xs.min()) - padding)
+            box_right = min(left + segment_end, left + segment_start + int(xs.max()) + 1 + padding)
+            box_top = max(top, top + int(ys.min()) - padding)
+            box_bottom = min(bottom, top + int(ys.max()) + 1 + padding)
+        if box_right <= box_left or box_bottom <= box_top:
+            refined.append(initial_boxes[index])
+            continue
+        refined.append(
+            [
+                [box_left, box_top],
+                [box_right, box_top],
+                [box_right, box_bottom],
+                [box_left, box_bottom],
+            ]
+        )
+    return refined
+
+
+def _line_ink_mask(crop: Image.Image) -> np.ndarray:
+    gray = np.asarray(crop, dtype=np.int16)
+    background = int(np.percentile(gray, 88))
+    global_darkness = np.clip(background - gray, 0, 255)
+    radius = max(2.0, min(crop.size) * 0.12)
+    local_background = np.asarray(crop.filter(ImageFilter.GaussianBlur(radius)), dtype=np.int16)
+    local_darkness = np.clip(local_background - gray, 0, 255)
+    darkness = np.maximum(global_darkness, local_darkness).astype(np.uint8)
+    threshold = max(10, _otsu_threshold(darkness))
+    return darkness >= threshold
+
+
+def _otsu_threshold(values: np.ndarray) -> int:
+    histogram = np.bincount(values.ravel(), minlength=256).astype(np.float64)
+    total = histogram.sum()
+    if total <= 0:
+        return 255
+    weighted_total = float(np.dot(np.arange(256), histogram))
+    background_weight = 0.0
+    background_sum = 0.0
+    best_variance = -1.0
+    best_threshold = 0
+    for threshold in range(256):
+        background_weight += histogram[threshold]
+        if background_weight <= 0:
+            continue
+        foreground_weight = total - background_weight
+        if foreground_weight <= 0:
+            break
+        background_sum += threshold * histogram[threshold]
+        background_mean = background_sum / background_weight
+        foreground_mean = (weighted_total - background_sum) / foreground_weight
+        variance = background_weight * foreground_weight * (background_mean - foreground_mean) ** 2
+        if variance > best_variance:
+            best_variance = variance
+            best_threshold = threshold
+    return best_threshold
+
+
+def _projection_boundaries(
+    projection: np.ndarray,
+    count: int,
+    raw_anchors: list[float],
+    *,
+    cross_size: int,
+) -> list[int]:
+    if count <= 1:
+        return []
+    length = len(projection)
+    nominal = length / count
+    min_width = max(1, round(nominal * 0.18))
+    max_width = max(min_width + 1, round(nominal * 2.25))
+    boundary_cost = np.zeros(length + 1, dtype=np.float64)
+    for position in range(1, length):
+        boundary_cost[position] = (
+            projection[max(0, position - 1)] + projection[min(length - 1, position)]
+        ) / max(1, cross_size * 2)
+
+    candidate_sets: list[list[int]] = []
+    for index in range(1, count):
+        anchor = raw_anchors[index - 1] if index - 1 < len(raw_anchors) else nominal * index
+        expected = nominal * index
+        center = anchor if 0 < anchor < length else expected
+        radius = nominal * 0.78
+        lower = max(min_width * index, round(center - radius))
+        upper = min(length - min_width * (count - index), round(center + radius))
+        if upper < lower:
+            lower = max(min_width * index, round(expected - radius))
+            upper = min(length - min_width * (count - index), round(expected + radius))
+        ranked = sorted(
+            range(lower, upper + 1),
+            key=lambda position: (
+                boundary_cost[position] + 0.025 * ((position - center) / max(1.0, nominal)) ** 2,
+                abs(position - center),
+            ),
+        )
+        candidates = sorted(set(ranked[:48] + [max(lower, min(upper, round(center)))]))
+        candidate_sets.append(candidates)
+
+    states: dict[int, tuple[float, list[int]]] = {0: (0.0, [])}
+    for candidates in candidate_sets:
+        next_states: dict[int, tuple[float, list[int]]] = {}
+        for position in candidates:
+            best: tuple[float, list[int]] | None = None
+            for previous, (cost, path) in states.items():
+                width = position - previous
+                if width < min_width or width > max_width:
+                    continue
+                width_cost = 0.045 * ((width - nominal) / max(1.0, nominal)) ** 2
+                candidate = (cost + boundary_cost[position] * 2.4 + width_cost, [*path, position])
+                if best is None or candidate[0] < best[0]:
+                    best = candidate
+            if best is not None:
+                next_states[position] = best
+        if not next_states:
+            return [round(length * index / count) for index in range(1, count)]
+        states = next_states
+
+    best_final: tuple[float, list[int]] | None = None
+    for previous, (cost, path) in states.items():
+        width = length - previous
+        if width < min_width or width > max_width:
+            continue
+        final_cost = cost + 0.045 * ((width - nominal) / max(1.0, nominal)) ** 2
+        if best_final is None or final_cost < best_final[0]:
+            best_final = (final_cost, path)
+    if best_final is None:
+        return [round(length * index / count) for index in range(1, count)]
+    return best_final[1]
 
 
 def _as_polygon(value: Any) -> list[list[int]] | None:
