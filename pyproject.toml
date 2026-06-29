@@ -13,7 +13,7 @@ dependencies = [
     "pywebview>=5.0",
     "paddleocr==3.7.0",
     # 3.3.x has a confirmed CPU oneDNN/PIR inference regression.
-    "paddlepaddle==3.2.2; platform_system == 'Linux'",
+    "paddlepaddle==3.2.2",
 ]
 
 [project.scripts]
