@@ -1110,7 +1110,7 @@ textarea {
   display: grid;
   min-width: 4px;
   min-height: 4px;
-  overflow: hidden;
+  overflow: visible;
   padding: 0;
   border: 1px solid #16825d;
   color: #0f5c43;
@@ -1119,6 +1119,7 @@ textarea {
 }
 
 .glyphBoxButton {
+  position: relative;
   width: 100%;
   height: 100%;
   min-width: 0;
@@ -1131,29 +1132,42 @@ textarea {
   cursor: pointer;
 }
 
-.glyphBoxEditor {
+.glyphBoxSelected {
   position: relative;
   width: 100%;
   height: 100%;
   padding: 0;
 }
 
-.glyphTextInput {
-  display: block;
-  width: 100%;
-  max-width: 100%;
-  min-width: 0;
-  height: 100%;
-  min-height: 0;
+.glyphStatusBadge {
+  position: absolute;
+  right: 2px;
+  bottom: 2px;
+  z-index: 4;
+  display: grid;
+  place-items: center;
+  width: 1.8em;
+  height: 1.8em;
+  min-width: 18px;
+  min-height: 18px;
   padding: 0;
-  border: 0;
-  border-radius: 0;
-  color: #0f5c43;
-  background: rgb(255 255 255 / 76%);
-  font-size: 11px;
+  border-radius: 50%;
+  color: #ffffff;
+  font-size: inherit;
+  font-weight: 600;
   line-height: 1;
-  text-align: center;
-  outline: none;
+  box-shadow: 0 1px 3px rgb(0 0 0 / 28%);
+  pointer-events: none;
+}
+
+.glyphStatusBadge.recognized {
+  background: rgb(112 20 31 / 70%);
+}
+
+.glyphStatusBadge.selected {
+  background: rgb(16 124 16 / 70%);
+  font-size: 12px;
+  font-weight: 700;
 }
 
 .glyphBox.lowConfidence {
@@ -1179,8 +1193,8 @@ textarea {
 
 .glyphOrderBadge {
   position: absolute;
-  right: 4px;
-  bottom: 4px;
+  top: 2px;
+  left: 2px;
   display: grid;
   place-items: center;
   min-width: 18px;

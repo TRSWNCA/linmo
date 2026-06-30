@@ -1806,11 +1806,6 @@ function SelectionWorkspace({
     setFocusedGlyphId((current) => current === glyphId ? null : current);
   }
 
-  function updateGlyph(glyphId: string, change: Partial<Glyph>) {
-    onDirtyChange(true);
-    setSelectedGlyphs((current) => current.map((glyph) => glyph.id === glyphId ? { ...glyph, ...change } : glyph));
-  }
-
   async function saveDetailedGlyph(updatedGlyph: Glyph) {
     const updatedGroups = sourceGroups.map((group) => ({
       ...group,
@@ -1913,25 +1908,18 @@ function SelectionWorkspace({
                     <button
                       type="button"
                       className="glyphBoxButton"
+                      aria-label={`选择识别字 ${glyph.text}`}
                       onPointerDown={(event) => event.stopPropagation()}
                       onClick={(event) => {
                         event.stopPropagation();
                         scheduleAppendGlyph(glyph);
                       }}
                     >
-                      <span>{glyph.text}</span>
+                      <span className="glyphStatusBadge recognized">{glyph.text}</span>
                     </button>
                   ) : (
-                    <div className="glyphBoxEditor" onPointerDown={(event) => event.stopPropagation()}>
-                      <input
-                        className="glyphTextInput"
-                        value={selectedGlyph.text}
-                        onFocus={() => setFocusedGlyphId(glyph.id)}
-                        onChange={(event) => updateGlyph(glyph.id, {
-                          text: event.target.value,
-                          kind: /^[\p{P}]+$/u.test(event.target.value) ? "punctuation" : "character",
-                        })}
-                      />
+                    <div className="glyphBoxSelected" onPointerDown={(event) => event.stopPropagation()}>
+                      <span className="glyphStatusBadge selected" aria-label={`已选择 ${selectedGlyph.text}`}>✓</span>
                       <button
                         type="button"
                         className="glyphDeleteButton"
@@ -1967,7 +1955,7 @@ function SelectionWorkspace({
             {analysis.model_id} · {analysis.engine === "fallback" ? "降级定位" : "本地 OCR"} · 点击可追加单字，拖框会按起点和主轴方向自动排序。
           </Text>
           <Text size={200} className="mutedText">
-            已选 {selectedGlyphs.length} 字。选中后的字会直接在页面框内显示输入框，可原位改字；右上角可删除。
+            已选 {selectedGlyphs.length} 字。双击任意识别框可放大编辑文字和边界；右上角可删除已选字。
           </Text>
           <Text size={200} className="mutedText">
             {saveFailed
