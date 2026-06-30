@@ -98,6 +98,9 @@ class LinmoApi:
     def get_page_preview(self, page_id: int) -> str:
         return file_to_data_url(self.services.create_page_preview(page_id))
 
+    def get_page_transform_preview(self, page_id: int) -> str:
+        return file_to_data_url(self.services.create_page_transform_preview(page_id))
+
     def get_copybook_cover(self, copybook_id: int) -> str:
         path = self.services.copybook_cover(copybook_id)
         return file_to_data_url(path) if path else ""
@@ -117,6 +120,13 @@ class LinmoApi:
         groups: list[dict[str, Any]],
     ) -> dict[str, Any]:
         return self.services.update_page_analysis(int(page_id), groups)
+
+    def update_page_ocr_groups(
+        self,
+        page_id: int,
+        groups: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        return self.services.update_page_ocr_groups(int(page_id), groups)
 
     def export_page_to_generated_post(
         self,

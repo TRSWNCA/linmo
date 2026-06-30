@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import base64
+import copy
 import hashlib
 import json
+import math
 import os
 import posixpath
 import shutil
@@ -97,6 +99,18 @@ class LinmoServices:
         image.convert("RGB").save(preview_path, "JPEG", quality=88)
         return preview_path
 
+    def create_page_transform_preview(self, page_id: int) -> Path:
+        page = self.repo.get_page_with_copybook(page_id)
+        preview_path = self.paths.previews_dir / f"transform-{page_id}.jpg"
+        if preview_path.exists():
+            return preview_path
+
+        image = self.load_page_transformed_image(page, dpi=180)
+        image.thumbnail((1200, 1200))
+        preview_path.parent.mkdir(parents=True, exist_ok=True)
+        image.convert("RGB").save(preview_path, "JPEG", quality=88)
+        return preview_path
+
     def copybook_cover(self, copybook_id: int) -> Path | None:
         copybook = self.repo.get_copybook(copybook_id)
         cover_path = Path(copybook["cover_path"]) if copybook.get("cover_path") else None
@@ -147,6 +161,9 @@ class LinmoServices:
         right_ratio = _copybook_crop_ratio(metadata.get("crop_right_ratio", current.get("crop_right_ratio", 0)))
         top_ratio = _copybook_crop_ratio(metadata.get("crop_top_ratio", current.get("crop_top_ratio", 0)))
         bottom_ratio = _copybook_crop_ratio(metadata.get("crop_bottom_ratio", current.get("crop_bottom_ratio", 0)))
+        rotation_degrees = _page_rotation_degrees(
+            metadata.get("rotation_degrees", current.get("rotation_degrees", 0))
+        )
         self._validate_crop_ratios(left_ratio, right_ratio, top_ratio, bottom_ratio)
 
         updated = self.repo.update_page(
@@ -156,6 +173,7 @@ class LinmoServices:
                 "crop_right_ratio": right_ratio,
                 "crop_top_ratio": top_ratio,
                 "crop_bottom_ratio": bottom_ratio,
+                "rotation_degrees": rotation_degrees,
                 "crop_override": 1,
             },
         )
@@ -164,17 +182,22 @@ class LinmoServices:
             or float(current.get("crop_right_ratio") or 0) != right_ratio
             or float(current.get("crop_top_ratio") or 0) != top_ratio
             or float(current.get("crop_bottom_ratio") or 0) != bottom_ratio
+            or float(current.get("rotation_degrees") or 0) != rotation_degrees
             or int(current.get("page_crop_override") or 0) != 1
         ):
             self._invalidate_page_caches(page_id)
         return self.repo.get_page_with_copybook(page_id)
 
     def load_page_image(self, page: dict[str, Any], dpi: int) -> Image.Image:
+        image = self.load_page_transformed_image(page, dpi)
+        return self._apply_page_crop(image, page)
+
+    def load_page_transformed_image(self, page: dict[str, Any], dpi: int) -> Image.Image:
         if page["copybook_source_type"] == "pdf":
             image = load_input_page(Path(page["copybook_source_path"]), int(page["page_no"]), dpi)
         else:
             image = load_input_page(Path(page["source_path"]), 1, dpi)
-        return self._apply_page_crop(image, page)
+        return self._apply_page_rotation(image, float(page.get("rotation_degrees", 0) or 0))
 
     def analyze_page(self, page_id: int, force: bool = False, dpi: int | None = None) -> dict[str, Any]:
         set_runtime_status("ocr", "loading_page", "正在读取页面", page_id=page_id)
@@ -225,6 +248,36 @@ class LinmoServices:
             updated["ocr_groups"] = analysis.get("ocr_groups") or analysis.get("groups", [])
         elif analysis.get("ocr_groups") is not None:
             updated["ocr_groups"] = analysis.get("ocr_groups")
+        return self.repo.save_page_analysis(page_id, updated)["analysis"]
+
+    def update_page_ocr_groups(
+        self,
+        page_id: int,
+        groups: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        analysis = self.analyze_page(page_id)
+        source_groups = copy.deepcopy(groups)
+        if analysis.get("selection_mode") == "ordered_stream":
+            updated = copy.deepcopy(analysis)
+            updated["ocr_groups"] = source_groups
+            source_glyphs = {
+                str(glyph.get("id")): glyph
+                for group in source_groups
+                for glyph in group.get("glyphs", [])
+            }
+            for group in updated.get("groups", []):
+                for glyph in group.get("glyphs", []):
+                    source = source_glyphs.get(str(glyph.get("id")))
+                    if source is None:
+                        continue
+                    glyph["text"] = source.get("text", glyph.get("text", ""))
+                    glyph["bbox"] = copy.deepcopy(source.get("bbox", glyph.get("bbox")))
+                    glyph["polygon"] = copy.deepcopy(source.get("polygon", glyph.get("polygon")))
+                    glyph["kind"] = source.get("kind", glyph.get("kind", "character"))
+            updated["status"] = "reviewed"
+        else:
+            updated = update_analysis(analysis, groups=source_groups)
+            updated["selection_mode"] = "ocr_groups"
         return self.repo.save_page_analysis(page_id, updated)["analysis"]
 
     def render_page_previews(
@@ -597,6 +650,37 @@ class LinmoServices:
         image.close()
         return cropped
 
+    def _apply_page_rotation(self, image: Image.Image, rotation_degrees: float) -> Image.Image:
+        angle = _page_rotation_degrees(rotation_degrees)
+        if abs(angle) < 0.001:
+            return image
+        normalized = angle % 360
+        if abs(normalized - 90) < 0.001:
+            rotated = image.transpose(Image.Transpose.ROTATE_90)
+        elif abs(normalized - 180) < 0.001:
+            rotated = image.transpose(Image.Transpose.ROTATE_180)
+        elif abs(normalized - 270) < 0.001:
+            rotated = image.transpose(Image.Transpose.ROTATE_270)
+        else:
+            rgb = image.convert("RGB")
+            corners = [
+                rgb.getpixel((0, 0)),
+                rgb.getpixel((max(0, rgb.width - 1), 0)),
+                rgb.getpixel((0, max(0, rgb.height - 1))),
+                rgb.getpixel((max(0, rgb.width - 1), max(0, rgb.height - 1))),
+            ]
+            fill = tuple(sorted(color[channel] for color in corners)[len(corners) // 2] for channel in range(3))
+            rotated = rgb.rotate(
+                angle,
+                resample=Image.Resampling.BICUBIC,
+                expand=True,
+                fillcolor=fill,
+            )
+            if rgb is not image:
+                rgb.close()
+        image.close()
+        return rotated
+
     def _validate_crop_ratios(self, left_ratio: float, right_ratio: float, top_ratio: float, bottom_ratio: float) -> None:
         if left_ratio + right_ratio >= MAX_TOTAL_COPYBOOK_CROP_RATIO:
             raise ValueError("left and right crop margins are too large")
@@ -612,6 +696,7 @@ class LinmoServices:
         for path in (
             self.paths.thumbs_dir / f"{page_id}.jpg",
             self.paths.previews_dir / f"source-{page_id}.jpg",
+            self.paths.previews_dir / f"transform-{page_id}.jpg",
         ):
             if path.exists():
                 path.unlink()
@@ -776,6 +861,19 @@ def _chinese_number(value: int) -> str:
 
 def _safe_remote_name(value: str) -> str:
     return value.replace("/", "／").replace("\\", "＼").strip() or "未命名"
+
+
+def _page_rotation_degrees(value: Any) -> float:
+    try:
+        angle = float(value or 0)
+    except (TypeError, ValueError):
+        angle = 0.0
+    if not math.isfinite(angle):
+        angle = 0.0
+    normalized = (angle + 180.0) % 360.0 - 180.0
+    if abs(normalized) < 0.001:
+        return 0.0
+    return round(normalized, 3)
 
 
 def _copybook_crop_ratio(value: Any) -> float:

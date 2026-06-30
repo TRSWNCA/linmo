@@ -81,6 +81,13 @@ type MakerParams = {
   margin_mm: number;
   dpi: number;
 };
+type PageCropDraft = {
+  leftPercent: number;
+  rightPercent: number;
+  topPercent: number;
+  bottomPercent: number;
+  rotationDegrees: number;
+};
 
 const APP_VERSION = `v${packageJson.version}`;
 const fallbackApi: Api = {
@@ -124,6 +131,7 @@ const fallbackApi: Api = {
       crop_right_ratio: 0,
       crop_top_ratio: 0,
       crop_bottom_ratio: 0,
+      rotation_degrees: 0,
       page_crop_left_ratio: 0,
       page_crop_right_ratio: 0,
       page_crop_top_ratio: 0,
@@ -143,6 +151,7 @@ const fallbackApi: Api = {
       crop_right_ratio: Number(metadata.crop_right_ratio || 0),
       crop_top_ratio: Number(metadata.crop_top_ratio || 0),
       crop_bottom_ratio: Number(metadata.crop_bottom_ratio || 0),
+      rotation_degrees: Number(metadata.rotation_degrees || 0),
       page_crop_left_ratio: Number(metadata.crop_left_ratio || 0),
       page_crop_right_ratio: Number(metadata.crop_right_ratio || 0),
       page_crop_top_ratio: Number(metadata.crop_top_ratio || 0),
@@ -157,6 +166,9 @@ const fallbackApi: Api = {
     return "";
   },
   async get_page_preview() {
+    return "";
+  },
+  async get_page_transform_preview() {
     return "";
   },
   async render_page_previews() {
@@ -175,6 +187,17 @@ const fallbackApi: Api = {
       image_size: [1, 1],
       groups,
       ocr_groups: [],
+    };
+  },
+  async update_page_ocr_groups(_pageId, groups) {
+    return {
+      version: 1,
+      model_id: "fallback",
+      engine: "fallback",
+      status: "reviewed",
+      selection_mode: "ocr_groups",
+      image_size: [1, 1],
+      groups,
     };
   },
   async export_page_to_generated_post(page_id, _params, name, outputFormat) {
@@ -337,6 +360,40 @@ function percentToCropRatio(value: unknown): number {
   return Math.max(0, Math.min(45, percent)) / 100;
 }
 
+function normalizeRotation(value: number): number {
+  const normalized = ((Number(value || 0) + 180) % 360 + 360) % 360 - 180;
+  return Math.abs(normalized) < 0.001 ? 0 : Number(normalized.toFixed(3));
+}
+
+function pageCropDraftKey(draft: PageCropDraft): string {
+  return [
+    draft.leftPercent,
+    draft.rightPercent,
+    draft.topPercent,
+    draft.bottomPercent,
+    draft.rotationDegrees,
+  ].join(":");
+}
+
+function rotateCropDraft(draft: PageCropDraft, delta: 90 | -90): PageCropDraft {
+  if (delta === 90) {
+    return {
+      leftPercent: draft.topPercent,
+      rightPercent: draft.bottomPercent,
+      topPercent: draft.rightPercent,
+      bottomPercent: draft.leftPercent,
+      rotationDegrees: normalizeRotation(draft.rotationDegrees + delta),
+    };
+  }
+  return {
+    leftPercent: draft.bottomPercent,
+    rightPercent: draft.topPercent,
+    topPercent: draft.leftPercent,
+    bottomPercent: draft.rightPercent,
+    rotationDegrees: normalizeRotation(draft.rotationDegrees + delta),
+  };
+}
+
 function api(): Api {
   return window.pywebview?.api || fallbackApi;
 }
@@ -358,7 +415,13 @@ function formatLogValue(value: unknown): string {
 }
 
 function appendFrontendLog(level: "warning" | "error", source: string, message: string, details = "") {
-  void api().append_runtime_log(level, source, message, details).catch(() => undefined);
+  const bridgeApi = window.pywebview?.api;
+  if (typeof bridgeApi?.append_runtime_log !== "function") return;
+  try {
+    void Promise.resolve(bridgeApi.append_runtime_log(level, source, message, details)).catch(() => undefined);
+  } catch {
+    // Diagnostics must never replace the original frontend error.
+  }
 }
 
 export function App() {
@@ -681,8 +744,9 @@ function Library({
   const [thumbs, setThumbs] = useState<Record<number, string>>({});
   const [loadingPages, setLoadingPages] = useState(false);
   const [loadingPagePreview, setLoadingPagePreview] = useState(false);
+  const [savingPageTransform, setSavingPageTransform] = useState(false);
   const [importing, setImporting] = useState(false);
-  const [cropDraft, setCropDraft] = useState<{ leftPercent: number; rightPercent: number; topPercent: number; bottomPercent: number } | null>(null);
+  const [cropDraft, setCropDraft] = useState<PageCropDraft | null>(null);
   const openRunId = useRef(0);
   const cropSaveRunId = useRef(0);
   const lastSavedCropKey = useRef("");
@@ -754,16 +818,18 @@ function Library({
     try {
       const [detail, preview] = await Promise.all([
         api().get_page_detail(page.id),
-        api().get_page_preview(page.id),
+        api().get_page_transform_preview(page.id),
       ]);
       setPageDetail(detail);
-      setCropDraft({
+      const draft = {
         leftPercent: ratioToPercent(detail.crop_left_ratio),
         rightPercent: ratioToPercent(detail.crop_right_ratio),
         topPercent: ratioToPercent(detail.crop_top_ratio),
         bottomPercent: ratioToPercent(detail.crop_bottom_ratio),
-      });
-      lastSavedCropKey.current = `${ratioToPercent(detail.crop_left_ratio)}:${ratioToPercent(detail.crop_right_ratio)}:${ratioToPercent(detail.crop_top_ratio)}:${ratioToPercent(detail.crop_bottom_ratio)}`;
+        rotationDegrees: Number(detail.rotation_degrees || 0),
+      };
+      setCropDraft(draft);
+      lastSavedCropKey.current = pageCropDraftKey(draft);
       setPagePreviewImage(preview);
     } catch (error) {
       setMessage(String(error));
@@ -774,7 +840,7 @@ function Library({
 
   async function refreshPageMedia(pageId: number) {
     const [preview, thumbnail] = await Promise.all([
-      api().get_page_preview(pageId),
+      api().get_page_transform_preview(pageId),
       api().get_page_thumbnail(pageId),
     ]);
     setPagePreviewImage(preview);
@@ -816,26 +882,39 @@ function Library({
 
   useEffect(() => {
     if (!pageDetail || !cropDraft) return;
-    const cropKey = `${cropDraft.leftPercent}:${cropDraft.rightPercent}:${cropDraft.topPercent}:${cropDraft.bottomPercent}`;
+    const cropKey = pageCropDraftKey(cropDraft);
     if (cropKey === lastSavedCropKey.current) return;
     if (cropDraft.leftPercent + cropDraft.rightPercent >= 80) return;
     if (cropDraft.topPercent + cropDraft.bottomPercent >= 80) return;
     const runId = ++cropSaveRunId.current;
     const timeout = window.setTimeout(() => {
+      setSavingPageTransform(true);
       api().update_page_crop(pageDetail.id, {
         crop_left_ratio: percentToCropRatio(cropDraft.leftPercent),
         crop_right_ratio: percentToCropRatio(cropDraft.rightPercent),
         crop_top_ratio: percentToCropRatio(cropDraft.topPercent),
         crop_bottom_ratio: percentToCropRatio(cropDraft.bottomPercent),
+        rotation_degrees: normalizeRotation(cropDraft.rotationDegrees),
       }).then(async (updated) => {
         if (cropSaveRunId.current !== runId) return;
         setPageDetail(updated);
         lastSavedCropKey.current = cropKey;
         await refreshPageMedia(updated.id);
-      }).catch((error) => setMessage(String(error)));
+      }).catch((error) => setMessage(String(error))).finally(() => {
+        if (cropSaveRunId.current === runId) {
+          setSavingPageTransform(false);
+        }
+      });
     }, 180);
     return () => window.clearTimeout(timeout);
-  }, [cropDraft?.leftPercent, cropDraft?.rightPercent, cropDraft?.topPercent, cropDraft?.bottomPercent, pageDetail?.id]);
+  }, [
+    cropDraft?.leftPercent,
+    cropDraft?.rightPercent,
+    cropDraft?.topPercent,
+    cropDraft?.bottomPercent,
+    cropDraft?.rotationDegrees,
+    pageDetail?.id,
+  ]);
 
   if (pagePreviewOpen && selected && (!pageDetail || !cropDraft)) {
     return (
@@ -856,18 +935,19 @@ function Library({
     const horizontalCropTooLarge = cropDraft.leftPercent + cropDraft.rightPercent >= 80;
     const verticalCropTooLarge = cropDraft.topPercent + cropDraft.bottomPercent >= 80;
     const cropTotalTooLarge = horizontalCropTooLarge || verticalCropTooLarge;
+    const transformDirty = pageCropDraftKey(cropDraft) !== lastSavedCropKey.current;
     return (
       <section className="pagePreviewView">
         <div className="previewTopbar">
           <Button icon={<ArrowLeft24Regular />} appearance="subtle" onClick={() => setPagePreviewOpen(false)}>返回</Button>
           <div className="previewTitle">
             <Title2>{selected.title}</Title2>
-            <Text className="mutedText">第 {pageDetail.page_no} 页 · 预览页级裁切后进入制帖</Text>
+            <Text className="mutedText">第 {pageDetail.page_no} 页 · 先旋转并裁掉框线，再进入 OCR</Text>
           </div>
           <Button
             appearance="primary"
             icon={<DocumentPdf24Regular />}
-            disabled={cropTotalTooLarge}
+            disabled={cropTotalTooLarge || transformDirty || savingPageTransform}
             onClick={() => openMaker({
               pageId: pageDetail.id,
               copybookId: pageDetail.copybook_id,
@@ -881,10 +961,34 @@ function Library({
         <Card className="contentCard singlePagePreviewCard">
           <div className="singlePagePreviewLayout">
             <div className="singlePagePreviewPane">
-              <PreviewPane title="裁切预览" image={pagePreviewImage} loading={loadingPagePreview || !pagePreviewImage} large />
+              <VisualCropEditor
+                image={pagePreviewImage}
+                draft={cropDraft}
+                loading={loadingPagePreview || !pagePreviewImage}
+                onChange={setCropDraft}
+              />
             </div>
             <div className="formStack singlePagePreviewSidebar">
-              <Text size={200} className="mutedText">保存到当前页，下次进入该页会直接复用这组裁切。</Text>
+              <Text size={200} className="mutedText">
+                拖动图中四条蓝边调整 OCR 范围。旋转和裁剪会保存到当前页，并统一用于识别、选字和导出。
+              </Text>
+              <Field label="旋转角度（°）" hint="可用 0.5° 微调倾斜。">
+                <Input
+                  type="number"
+                  min={-180}
+                  max={180}
+                  step={0.5}
+                  value={String(cropDraft.rotationDegrees)}
+                  onChange={(_, data) => setCropDraft((current) => current ? {
+                    ...current,
+                    rotationDegrees: normalizeRotation(Number(data.value)),
+                  } : current)}
+                />
+              </Field>
+              <div className="rotationButtons">
+                <Button onClick={() => setCropDraft((current) => current ? rotateCropDraft(current, -90) : current)}>顺时针 90°</Button>
+                <Button onClick={() => setCropDraft((current) => current ? rotateCropDraft(current, 90) : current)}>逆时针 90°</Button>
+              </div>
               <div className="formGrid">
                 <Field label="左页边预裁切（%）" hint="先裁左边缘。">
                   <Input
@@ -929,6 +1033,7 @@ function Library({
               </div>
               {horizontalCropTooLarge && <Text size={200} className="mutedText">左右预裁切合计需小于 80%。</Text>}
               {verticalCropTooLarge && <Text size={200} className="mutedText">上下预裁切合计需小于 80%。</Text>}
+              {(transformDirty || savingPageTransform) && <Text size={200} className="mutedText">正在保存页面变换……</Text>}
             </div>
           </div>
         </Card>
@@ -1298,6 +1403,29 @@ function Maker({
     }
   }
 
+  async function saveOcrGroups(groups: GlyphGroup[]): Promise<boolean> {
+    if (!session) return false;
+    const pageId = session.pageId;
+    pendingSaveCount.current += 1;
+    setSavingAnalysis(true);
+    const saveTask = saveQueue.current.then(async () => {
+      await api().update_page_ocr_groups(pageId, groups);
+    });
+    saveQueue.current = saveTask.catch(() => undefined);
+    try {
+      await saveTask;
+      return true;
+    } catch (error) {
+      setMessage(String(error));
+      return false;
+    } finally {
+      pendingSaveCount.current = Math.max(0, pendingSaveCount.current - 1);
+      if (!pendingSaveCount.current) {
+        setSavingAnalysis(false);
+      }
+    }
+  }
+
   async function openExportDialog() {
     if (selectionDirty || savingAnalysis) {
       setMessage("正在自动保存当前选字和改字，请稍后导出");
@@ -1418,6 +1546,7 @@ function Maker({
             recognizing={analyzing}
             onRecognizeAgain={() => recognizePage(true)}
             onSave={saveAnalysis}
+            onSaveOcrGroups={saveOcrGroups}
             onDirtyChange={setSelectionDirty}
           />
         ) : (
@@ -1546,6 +1675,7 @@ function SelectionWorkspace({
   recognizing,
   onRecognizeAgain,
   onSave,
+  onSaveOcrGroups,
   onDirtyChange,
 }: {
   analysis: PageAnalysis;
@@ -1554,14 +1684,17 @@ function SelectionWorkspace({
   recognizing: boolean;
   onRecognizeAgain: () => Promise<unknown>;
   onSave: (groups: GlyphGroup[]) => Promise<boolean>;
+  onSaveOcrGroups: (groups: GlyphGroup[]) => Promise<boolean>;
   onDirtyChange: (dirty: boolean) => void;
 }) {
-  const sourceGroups = cloneGlyphGroups(
+  const initialSourceGroups = cloneGlyphGroups(
     analysis.selection_mode === "ordered_stream" && analysis.ocr_groups?.length
       ? analysis.ocr_groups
       : analysis.groups,
   );
+  const [sourceGroups, setSourceGroups] = useState<GlyphGroup[]>(initialSourceGroups);
   const [selectedGlyphs, setSelectedGlyphs] = useState<Glyph[]>(() => selectedStreamFromAnalysis(analysis));
+  const [editingGlyph, setEditingGlyph] = useState<Glyph | null>(null);
   const [focusedGlyphId, setFocusedGlyphId] = useState<string | null>(null);
   const [selectionRect, setSelectionRect] = useState<null | { x1: number; y1: number; x2: number; y2: number }>(null);
   const [savedSignature, setSavedSignature] = useState(() => glyphSignature(selectedStreamFromAnalysis(analysis)));
@@ -1569,6 +1702,7 @@ function SelectionWorkspace({
   const [retryVersion, setRetryVersion] = useState(0);
   const autoSaveRunId = useRef(0);
   const onSaveRef = useRef(onSave);
+  const glyphClickTimer = useRef<number | null>(null);
   const overlayDrag = useRef<null | {
     pointerId: number;
     startX: number;
@@ -1583,16 +1717,28 @@ function SelectionWorkspace({
   const isDirty = currentSignature !== savedSignature;
 
   useEffect(() => {
+    setSourceGroups(cloneGlyphGroups(
+      analysis.selection_mode === "ordered_stream" && analysis.ocr_groups?.length
+        ? analysis.ocr_groups
+        : analysis.groups,
+    ));
     setSelectedGlyphs(selectedStreamFromAnalysis(analysis));
     setSavedSignature(initialSignature);
     setSaveFailed(false);
     setFocusedGlyphId(null);
     setSelectionRect(null);
+    setEditingGlyph(null);
   }, [analysis]);
 
   useEffect(() => {
     onSaveRef.current = onSave;
   }, [onSave]);
+
+  useEffect(() => () => {
+    if (glyphClickTimer.current !== null) {
+      window.clearTimeout(glyphClickTimer.current);
+    }
+  }, []);
 
   useEffect(() => {
     onDirtyChange(isDirty);
@@ -1635,6 +1781,24 @@ function SelectionWorkspace({
     setFocusedGlyphId(glyph.id);
   }
 
+  function scheduleAppendGlyph(glyph: Glyph) {
+    if (glyphClickTimer.current !== null) {
+      window.clearTimeout(glyphClickTimer.current);
+    }
+    glyphClickTimer.current = window.setTimeout(() => {
+      appendGlyph(glyph);
+      glyphClickTimer.current = null;
+    }, 220);
+  }
+
+  function openDetailedEditor(glyph: Glyph) {
+    if (glyphClickTimer.current !== null) {
+      window.clearTimeout(glyphClickTimer.current);
+      glyphClickTimer.current = null;
+    }
+    setEditingGlyph(cloneGlyph(glyph));
+  }
+
   function removeGlyph(glyphId: string) {
     if (!selectedIds.has(glyphId)) return;
     onDirtyChange(true);
@@ -1645,6 +1809,21 @@ function SelectionWorkspace({
   function updateGlyph(glyphId: string, change: Partial<Glyph>) {
     onDirtyChange(true);
     setSelectedGlyphs((current) => current.map((glyph) => glyph.id === glyphId ? { ...glyph, ...change } : glyph));
+  }
+
+  async function saveDetailedGlyph(updatedGlyph: Glyph) {
+    const updatedGroups = sourceGroups.map((group) => ({
+      ...group,
+      glyphs: group.glyphs.map((glyph) => glyph.id === updatedGlyph.id ? cloneGlyph(updatedGlyph) : cloneGlyph(glyph)),
+    }));
+    const saved = await onSaveOcrGroups(updatedGroups);
+    if (!saved) return;
+    setSourceGroups(updatedGroups);
+    setSelectedGlyphs((current) => current.map((glyph) => (
+      glyph.id === updatedGlyph.id ? cloneGlyph(updatedGlyph) : glyph
+    )));
+    setFocusedGlyphId(updatedGlyph.id);
+    setEditingGlyph(null);
   }
 
   function commitSelection() {
@@ -1661,7 +1840,8 @@ function SelectionWorkspace({
   }
 
   return (
-    <div className="analysisWorkspace">
+    <>
+      <div className="analysisWorkspace">
       <div className="analysisWorkspaceContent">
         <div className="analysisCanvas">
           {source ? <img src={source} alt="待选字原图" /> : <Spinner />}
@@ -1724,6 +1904,10 @@ function SelectionWorkspace({
                     width: `${Math.max(0.3, (right - left) / imageWidth * 100)}%`,
                     height: `${Math.max(0.3, (bottom - top) / imageHeight * 100)}%`,
                   }}
+                  onDoubleClick={(event) => {
+                    event.stopPropagation();
+                    openDetailedEditor(selectedGlyph);
+                  }}
                 >
                   {!isSelected ? (
                     <button
@@ -1732,21 +1916,20 @@ function SelectionWorkspace({
                       onPointerDown={(event) => event.stopPropagation()}
                       onClick={(event) => {
                         event.stopPropagation();
-                        appendGlyph(glyph);
+                        scheduleAppendGlyph(glyph);
                       }}
                     >
                       <span>{glyph.text}</span>
                     </button>
                   ) : (
                     <div className="glyphBoxEditor" onPointerDown={(event) => event.stopPropagation()}>
-                      <Input
-                        size="small"
-                        appearance="filled-lighter"
+                      <input
+                        className="glyphTextInput"
                         value={selectedGlyph.text}
                         onFocus={() => setFocusedGlyphId(glyph.id)}
-                        onChange={(_, data) => updateGlyph(glyph.id, {
-                          text: data.value,
-                          kind: /^[\p{P}]+$/u.test(data.value) ? "punctuation" : "character",
+                        onChange={(event) => updateGlyph(glyph.id, {
+                          text: event.target.value,
+                          kind: /^[\p{P}]+$/u.test(event.target.value) ? "punctuation" : "character",
                         })}
                       />
                       <button
@@ -1809,6 +1992,273 @@ function SelectionWorkspace({
             重试保存
           </Button>
         )}
+      </div>
+      </div>
+      {editingGlyph && (
+        <GlyphRegionEditor
+          source={source}
+          imageWidth={imageWidth}
+          imageHeight={imageHeight}
+          glyph={editingGlyph}
+          saving={saving}
+          onCancel={() => setEditingGlyph(null)}
+          onSave={saveDetailedGlyph}
+        />
+      )}
+    </>
+  );
+}
+
+function GlyphRegionEditor({
+  source,
+  imageWidth,
+  imageHeight,
+  glyph,
+  saving,
+  onCancel,
+  onSave,
+}: {
+  source: string;
+  imageWidth: number;
+  imageHeight: number;
+  glyph: Glyph;
+  saving: boolean;
+  onCancel: () => void;
+  onSave: (glyph: Glyph) => Promise<void>;
+}) {
+  type BoxEdge = "left" | "right" | "top" | "bottom";
+  const [draft, setDraft] = useState<Glyph>(() => cloneGlyph(glyph));
+  const drag = useRef<null | {
+    edge: BoxEdge;
+    pointerId: number;
+    rect: DOMRect;
+  }>(null);
+  const [left, top, right, bottom] = glyph.bbox;
+  const glyphWidth = Math.max(1, right - left);
+  const glyphHeight = Math.max(1, bottom - top);
+  const padding = Math.max(24, Math.max(glyphWidth, glyphHeight) * 1.35);
+  const focusLeft = Math.max(0, left - padding);
+  const focusTop = Math.max(0, top - padding);
+  const focusRight = Math.min(imageWidth, right + padding);
+  const focusBottom = Math.min(imageHeight, bottom + padding);
+  const focusWidth = Math.max(1, focusRight - focusLeft);
+  const focusHeight = Math.max(1, focusBottom - focusTop);
+
+  useEffect(() => {
+    setDraft(cloneGlyph(glyph));
+  }, [glyph]);
+
+  function beginDrag(edge: BoxEdge, event: ReactPointerEvent<HTMLButtonElement>) {
+    const canvas = event.currentTarget.closest(".glyphRegionCanvas");
+    if (!(canvas instanceof HTMLElement)) return;
+    event.preventDefault();
+    event.currentTarget.setPointerCapture(event.pointerId);
+    drag.current = {
+      edge,
+      pointerId: event.pointerId,
+      rect: canvas.getBoundingClientRect(),
+    };
+  }
+
+  function moveDrag(event: ReactPointerEvent<HTMLButtonElement>) {
+    const current = drag.current;
+    if (!current || current.pointerId !== event.pointerId) return;
+    const x = focusLeft + Math.max(0, Math.min(1, (event.clientX - current.rect.left) / Math.max(1, current.rect.width))) * focusWidth;
+    const y = focusTop + Math.max(0, Math.min(1, (event.clientY - current.rect.top) / Math.max(1, current.rect.height))) * focusHeight;
+    setDraft((value) => {
+      const bbox = [...value.bbox] as [number, number, number, number];
+      if (current.edge === "left") bbox[0] = Math.max(focusLeft, Math.min(Math.round(x), bbox[2] - 1));
+      if (current.edge === "right") bbox[2] = Math.min(focusRight, Math.max(Math.round(x), bbox[0] + 1));
+      if (current.edge === "top") bbox[1] = Math.max(focusTop, Math.min(Math.round(y), bbox[3] - 1));
+      if (current.edge === "bottom") bbox[3] = Math.min(focusBottom, Math.max(Math.round(y), bbox[1] + 1));
+      return { ...value, bbox };
+    });
+  }
+
+  function endDrag(event: ReactPointerEvent<HTMLButtonElement>) {
+    if (drag.current?.pointerId === event.pointerId) {
+      drag.current = null;
+    }
+  }
+
+  async function save() {
+    const [draftLeft, draftTop, draftRight, draftBottom] = draft.bbox;
+    await onSave({
+      ...cloneGlyph(draft),
+      text: draft.text.trim(),
+      kind: /^[\p{P}]+$/u.test(draft.text.trim()) ? "punctuation" : "character",
+      polygon: [
+        [draftLeft, draftTop],
+        [draftRight, draftTop],
+        [draftRight, draftBottom],
+        [draftLeft, draftBottom],
+      ],
+    });
+  }
+
+  return (
+    <Dialog open>
+      <DialogSurface className="glyphRegionDialogSurface">
+        <DialogBody>
+          <DialogTitle>编辑识别字框</DialogTitle>
+          <DialogContent className="glyphRegionDialogContent">
+            <Field label="识别文字">
+              <Input
+                value={draft.text}
+                autoFocus
+                onChange={(_, data) => setDraft((value) => ({ ...value, text: data.value }))}
+              />
+            </Field>
+            <Text size={200} className="mutedText">拖动蓝框的四条边调整识别范围，画面已聚焦到当前字周围。</Text>
+            <div className="glyphRegionViewport">
+              {source ? (
+                <div
+                  className="glyphRegionCanvas"
+                  style={{ aspectRatio: `${focusWidth} / ${focusHeight}` }}
+                >
+                  <img
+                    src={source}
+                    alt="当前识别字周围区域"
+                    draggable={false}
+                    style={{
+                      width: `${imageWidth / focusWidth * 100}%`,
+                      height: `${imageHeight / focusHeight * 100}%`,
+                      left: `${-focusLeft / focusWidth * 100}%`,
+                      top: `${-focusTop / focusHeight * 100}%`,
+                    }}
+                  />
+                  <div
+                    className="glyphRegionBox"
+                    style={{
+                      left: `${(draft.bbox[0] - focusLeft) / focusWidth * 100}%`,
+                      top: `${(draft.bbox[1] - focusTop) / focusHeight * 100}%`,
+                      width: `${(draft.bbox[2] - draft.bbox[0]) / focusWidth * 100}%`,
+                      height: `${(draft.bbox[3] - draft.bbox[1]) / focusHeight * 100}%`,
+                    }}
+                  >
+                    {(["left", "right", "top", "bottom"] as BoxEdge[]).map((edge) => (
+                      <button
+                        key={edge}
+                        type="button"
+                        aria-label={`拖动${edge}字框边`}
+                        className={`glyphRegionHandle ${edge}`}
+                        onPointerDown={(event) => beginDrag(edge, event)}
+                        onPointerMove={moveDrag}
+                        onPointerUp={endDrag}
+                        onPointerCancel={endDrag}
+                      />
+                    ))}
+                  </div>
+                </div>
+              ) : <Spinner label="正在加载页面图像" />}
+            </div>
+            <Text size={100} className="mutedText">
+              坐标：{draft.bbox.join(", ")}
+            </Text>
+          </DialogContent>
+          <DialogActions>
+            <Button disabled={saving} onClick={onCancel}>取消</Button>
+            <Button appearance="primary" disabled={saving || !draft.text.trim()} onClick={() => save().catch(() => undefined)}>
+              {saving ? "保存中" : "保存"}
+            </Button>
+          </DialogActions>
+        </DialogBody>
+      </DialogSurface>
+    </Dialog>
+  );
+}
+
+function VisualCropEditor({
+  image,
+  draft,
+  loading,
+  onChange,
+}: {
+  image: string;
+  draft: PageCropDraft;
+  loading: boolean;
+  onChange: (value: PageCropDraft) => void;
+}) {
+  type CropEdge = "left" | "right" | "top" | "bottom";
+  const drag = useRef<null | {
+    edge: CropEdge;
+    pointerId: number;
+    rect: DOMRect;
+  }>(null);
+
+  function beginDrag(edge: CropEdge, event: ReactPointerEvent<HTMLButtonElement>) {
+    const canvas = event.currentTarget.closest(".visualCropCanvas");
+    if (!(canvas instanceof HTMLElement)) return;
+    event.preventDefault();
+    event.stopPropagation();
+    event.currentTarget.setPointerCapture(event.pointerId);
+    drag.current = {
+      edge,
+      pointerId: event.pointerId,
+      rect: canvas.getBoundingClientRect(),
+    };
+  }
+
+  function moveDrag(event: ReactPointerEvent<HTMLButtonElement>) {
+    const current = drag.current;
+    if (!current || current.pointerId !== event.pointerId) return;
+    const x = Math.max(0, Math.min(1, (event.clientX - current.rect.left) / Math.max(1, current.rect.width)));
+    const y = Math.max(0, Math.min(1, (event.clientY - current.rect.top) / Math.max(1, current.rect.height)));
+    const next = { ...draft };
+    if (current.edge === "left") {
+      next.leftPercent = Math.min(45, Math.max(0, x * 100), 79.5 - draft.rightPercent);
+    } else if (current.edge === "right") {
+      next.rightPercent = Math.min(45, Math.max(0, (1 - x) * 100), 79.5 - draft.leftPercent);
+    } else if (current.edge === "top") {
+      next.topPercent = Math.min(45, Math.max(0, y * 100), 79.5 - draft.bottomPercent);
+    } else {
+      next.bottomPercent = Math.min(45, Math.max(0, (1 - y) * 100), 79.5 - draft.topPercent);
+    }
+    next.leftPercent = Number(next.leftPercent.toFixed(2));
+    next.rightPercent = Number(next.rightPercent.toFixed(2));
+    next.topPercent = Number(next.topPercent.toFixed(2));
+    next.bottomPercent = Number(next.bottomPercent.toFixed(2));
+    onChange(next);
+  }
+
+  function endDrag(event: ReactPointerEvent<HTMLButtonElement>) {
+    if (drag.current?.pointerId === event.pointerId) {
+      drag.current = null;
+    }
+  }
+
+  if (loading) {
+    return <div className="visualCropLoading"><Spinner label="正在加载旋转前裁剪预览" /></div>;
+  }
+  return (
+    <div className="visualCropEditor">
+      <Text size={200} weight="semibold">OCR 预裁剪范围</Text>
+      <div className="visualCropViewport">
+        <div className="visualCropCanvas">
+          <img src={image} alt="待旋转和裁剪的页面" draggable={false} />
+          <div
+            className="visualCropSelection"
+            style={{
+              left: `${draft.leftPercent}%`,
+              right: `${draft.rightPercent}%`,
+              top: `${draft.topPercent}%`,
+              bottom: `${draft.bottomPercent}%`,
+            }}
+          >
+            {(["left", "right", "top", "bottom"] as CropEdge[]).map((edge) => (
+              <button
+                key={edge}
+                type="button"
+                aria-label={`拖动${edge}裁剪边`}
+                className={`visualCropHandle ${edge}`}
+                onPointerDown={(event) => beginDrag(edge, event)}
+                onPointerMove={moveDrag}
+                onPointerUp={endDrag}
+                onPointerCancel={endDrag}
+              />
+            ))}
+          </div>
+        </div>
       </div>
     </div>
   );

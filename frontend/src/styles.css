@@ -639,6 +639,105 @@ textarea {
   padding: 8px 0;
 }
 
+.rotationButtons {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+.visualCropEditor {
+  display: grid;
+  gap: 8px;
+  min-height: 0;
+}
+
+.visualCropLoading {
+  display: grid;
+  place-items: center;
+  min-height: 420px;
+  border-radius: 8px;
+  background: #f3f3f3;
+}
+
+.visualCropViewport {
+  display: grid;
+  place-items: start center;
+  min-height: 0;
+  max-height: calc(100vh - 250px);
+  padding: 12px;
+  border-radius: 8px;
+  background: #ececec;
+  overflow: auto;
+}
+
+.visualCropCanvas {
+  position: relative;
+  display: inline-block;
+  max-width: 100%;
+  line-height: 0;
+  overflow: hidden;
+  box-shadow: 0 2px 12px rgb(0 0 0 / 16%);
+}
+
+.visualCropCanvas img {
+  display: block;
+  max-width: 100%;
+  max-height: calc(100vh - 285px);
+  width: auto;
+  height: auto;
+  user-select: none;
+  pointer-events: none;
+}
+
+.visualCropSelection {
+  position: absolute;
+  border: 2px solid #0f6cbd;
+  box-shadow: 0 0 0 9999px rgb(0 0 0 / 42%);
+  pointer-events: none;
+}
+
+.visualCropHandle {
+  position: absolute;
+  z-index: 2;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  pointer-events: auto;
+  touch-action: none;
+}
+
+.visualCropHandle.left,
+.visualCropHandle.right {
+  top: -8px;
+  bottom: -8px;
+  width: 18px;
+  cursor: ew-resize;
+}
+
+.visualCropHandle.left {
+  left: -10px;
+}
+
+.visualCropHandle.right {
+  right: -10px;
+}
+
+.visualCropHandle.top,
+.visualCropHandle.bottom {
+  right: -8px;
+  left: -8px;
+  height: 18px;
+  cursor: ns-resize;
+}
+
+.visualCropHandle.top {
+  top: -10px;
+}
+
+.visualCropHandle.bottom {
+  bottom: -10px;
+}
+
 .previewPaneTitle {
   justify-self: center;
 }
@@ -782,6 +881,94 @@ textarea {
   width: min(1080px, calc(100vw - 48px));
   max-width: none;
   height: min(820px, calc(100vh - 48px));
+}
+
+.glyphRegionDialogSurface {
+  width: min(900px, calc(100vw - 48px));
+  max-width: none;
+}
+
+.glyphRegionDialogContent {
+  display: grid;
+  gap: 12px;
+}
+
+.glyphRegionViewport {
+  display: grid;
+  place-items: center;
+  min-height: 360px;
+  max-height: 620px;
+  padding: 14px;
+  border-radius: 8px;
+  background: #e8e8e8;
+  overflow: auto;
+}
+
+.glyphRegionCanvas {
+  position: relative;
+  width: min(680px, 100%);
+  max-height: 580px;
+  background: #ffffff;
+  box-shadow: 0 2px 14px rgb(0 0 0 / 18%);
+  overflow: hidden;
+}
+
+.glyphRegionCanvas img {
+  position: absolute;
+  display: block;
+  max-width: none;
+  pointer-events: none;
+  user-select: none;
+}
+
+.glyphRegionBox {
+  position: absolute;
+  border: 2px solid #0f6cbd;
+  background: rgb(15 108 189 / 8%);
+  box-shadow: 0 0 0 1px rgb(255 255 255 / 80%);
+  pointer-events: none;
+}
+
+.glyphRegionHandle {
+  position: absolute;
+  z-index: 2;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  pointer-events: auto;
+  touch-action: none;
+}
+
+.glyphRegionHandle.left,
+.glyphRegionHandle.right {
+  top: -10px;
+  bottom: -10px;
+  width: 22px;
+  cursor: ew-resize;
+}
+
+.glyphRegionHandle.left {
+  left: -12px;
+}
+
+.glyphRegionHandle.right {
+  right: -12px;
+}
+
+.glyphRegionHandle.top,
+.glyphRegionHandle.bottom {
+  right: -10px;
+  left: -10px;
+  height: 22px;
+  cursor: ns-resize;
+}
+
+.glyphRegionHandle.top {
+  top: -12px;
+}
+
+.glyphRegionHandle.bottom {
+  bottom: -12px;
 }
 
 .runtimeLogDialogContent {
@@ -946,21 +1133,27 @@ textarea {
 
 .glyphBoxEditor {
   position: relative;
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  gap: 2px;
   width: 100%;
   height: 100%;
-  padding: 2px;
-  align-items: start;
+  padding: 0;
 }
 
-.glyphBoxEditor [role="textbox"],
-.glyphBoxEditor input {
+.glyphTextInput {
+  display: block;
+  width: 100%;
+  max-width: 100%;
   min-width: 0;
   height: 100%;
-  font-size: 12px;
+  min-height: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  color: #0f5c43;
+  background: rgb(255 255 255 / 76%);
+  font-size: 11px;
+  line-height: 1;
   text-align: center;
+  outline: none;
 }
 
 .glyphBox.lowConfidence {
@@ -1002,6 +1195,10 @@ textarea {
 }
 
 .glyphDeleteButton {
+  position: absolute;
+  top: 1px;
+  right: 1px;
+  z-index: 2;
   width: 18px;
   height: 18px;
   padding: 0;

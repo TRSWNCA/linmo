@@ -40,6 +40,7 @@ CREATE TABLE IF NOT EXISTS pages (
     crop_right_ratio REAL NOT NULL DEFAULT 0,
     crop_top_ratio REAL NOT NULL DEFAULT 0,
     crop_bottom_ratio REAL NOT NULL DEFAULT 0,
+    rotation_degrees REAL NOT NULL DEFAULT 0,
     crop_override INTEGER NOT NULL DEFAULT 0,
     thumb_path TEXT NOT NULL DEFAULT '',
     UNIQUE(copybook_id, page_no)
@@ -133,6 +134,7 @@ class Repository:
             _ensure_column(conn, "pages", "crop_right_ratio", "REAL NOT NULL DEFAULT 0")
             _ensure_column(conn, "pages", "crop_top_ratio", "REAL NOT NULL DEFAULT 0")
             _ensure_column(conn, "pages", "crop_bottom_ratio", "REAL NOT NULL DEFAULT 0")
+            _ensure_column(conn, "pages", "rotation_degrees", "REAL NOT NULL DEFAULT 0")
             _ensure_column(conn, "pages", "crop_override", "INTEGER NOT NULL DEFAULT 0")
             _ensure_column(conn, "generated_posts", "thumb_path", "TEXT NOT NULL DEFAULT ''")
             _ensure_column(conn, "generated_posts", "output_format", "TEXT NOT NULL DEFAULT 'pdf'")
@@ -233,8 +235,9 @@ class Repository:
                 """
                 INSERT INTO pages
                     (copybook_id, page_no, source_path, width, height,
-                     crop_left_ratio, crop_right_ratio, crop_top_ratio, crop_bottom_ratio, crop_override, thumb_path)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     crop_left_ratio, crop_right_ratio, crop_top_ratio, crop_bottom_ratio,
+                     rotation_degrees, crop_override, thumb_path)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     data["copybook_id"],
@@ -246,6 +249,7 @@ class Repository:
                     float(data.get("crop_right_ratio", 0) or 0),
                     float(data.get("crop_top_ratio", 0) or 0),
                     float(data.get("crop_bottom_ratio", 0) or 0),
+                    float(data.get("rotation_degrees", 0) or 0),
                     int(data.get("crop_override", 0) or 0),
                     data.get("thumb_path", ""),
                 ),
@@ -321,11 +325,19 @@ class Repository:
         return _row_to_dict(row)
 
     def update_page(self, page_id: int, metadata: dict[str, Any]) -> dict[str, Any]:
-        allowed = ["crop_left_ratio", "crop_right_ratio", "crop_top_ratio", "crop_bottom_ratio", "crop_override", "thumb_path"]
+        allowed = [
+            "crop_left_ratio",
+            "crop_right_ratio",
+            "crop_top_ratio",
+            "crop_bottom_ratio",
+            "rotation_degrees",
+            "crop_override",
+            "thumb_path",
+        ]
         values = {
             key: (
                 float(metadata[key])
-                if key in {"crop_left_ratio", "crop_right_ratio", "crop_top_ratio", "crop_bottom_ratio"}
+                if key in {"crop_left_ratio", "crop_right_ratio", "crop_top_ratio", "crop_bottom_ratio", "rotation_degrees"}
                 else int(metadata[key])
                 if key == "crop_override"
                 else str(metadata[key])
@@ -358,6 +370,7 @@ class Repository:
                        p.crop_right_ratio AS page_crop_right_ratio,
                        p.crop_top_ratio AS page_crop_top_ratio,
                        p.crop_bottom_ratio AS page_crop_bottom_ratio,
+                       p.rotation_degrees AS rotation_degrees,
                        p.crop_override AS page_crop_override,
                        CASE WHEN COALESCE(p.crop_override, 0) = 1 THEN p.crop_left_ratio ELSE c.crop_left_ratio END AS crop_left_ratio,
                        CASE WHEN COALESCE(p.crop_override, 0) = 1 THEN p.crop_right_ratio ELSE c.crop_right_ratio END AS crop_right_ratio,

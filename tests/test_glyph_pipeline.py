@@ -67,6 +67,29 @@ class GlyphPipelineTests(unittest.TestCase):
             [[14, 22, 63, 88], [76, 21, 146, 89]],
         )
 
+    def test_vertical_word_boxes_are_paired_with_canonical_text_order(self) -> None:
+        analysis = analysis_from_ocr_payload(
+            {
+                "rec_texts": ["天地"],
+                "rec_scores": [0.95],
+                "rec_polys": [[[20, 10], [90, 10], [90, 210], [20, 210]]],
+                # Paddle may return text_word in recognition order while sorting
+                # text_word_boxes geometrically.
+                "text_word": [["地", "天"]],
+                "text_word_boxes": [
+                    [
+                        [22, 112, 88, 205],
+                        [24, 15, 86, 104],
+                    ]
+                ],
+            },
+            (120, 230),
+        )
+
+        glyphs = analysis["groups"][0]["glyphs"]
+        self.assertEqual([glyph["text"] for glyph in glyphs], ["天", "地"])
+        self.assertEqual([glyph["bbox"] for glyph in glyphs], [[24, 15, 86, 104], [22, 112, 88, 205]])
+
     def test_refines_uneven_character_spacing_from_ink_projection(self) -> None:
         image = Image.new("RGB", (240, 100), "white")
         draw = ImageDraw.Draw(image)

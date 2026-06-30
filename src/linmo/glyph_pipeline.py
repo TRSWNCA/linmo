@@ -14,7 +14,7 @@ from PIL import Image, ImageDraw, ImageFilter
 from .runtime import add_runtime_log, log_exception
 
 
-ANALYSIS_VERSION = 3
+ANALYSIS_VERSION = 4
 OCR_MODEL_ID = "PP-OCRv6_medium"
 
 
@@ -171,9 +171,6 @@ def analysis_from_ocr_payload(
     )
     if word_boxes is None:
         word_boxes = []
-    text_words = _first_present(payload, "text_word", "rec_words", "words")
-    if text_words is None:
-        text_words = []
     groups: list[dict[str, Any]] = []
     for line_index, text in enumerate(texts):
         line_poly = _as_polygon(line_polys[line_index]) if line_index < len(line_polys) else None
@@ -182,8 +179,10 @@ def analysis_from_ocr_payload(
         score = float(scores[line_index]) if line_index < len(scores) else 0.0
         direction = _direction_for_polygon(line_poly, str(text))
         boxes_for_line = word_boxes[line_index] if line_index < len(word_boxes) else None
-        raw_tokens = text_words[line_index] if line_index < len(text_words) else None
-        tokens = [str(token) for token in raw_tokens] if raw_tokens else list(str(text))
+        # PaddleOCR sorts word boxes geometrically without applying the same
+        # permutation to text_word. The recognized line text is therefore the
+        # canonical character order; boxes are sorted independently below.
+        tokens = list(str(text))
         char_boxes = _character_boxes(tokens, line_poly, boxes_for_line, direction, image=image)
         glyphs = []
         for char_index, (char, box) in enumerate(zip(tokens, char_boxes)):
@@ -666,6 +665,17 @@ def _character_boxes(
             polygon = _as_polygon(raw)
             if polygon is not None:
                 parsed.append(polygon)
+    parsed.sort(
+        key=lambda polygon: (
+            _polygon_center(polygon)[1],
+            _polygon_center(polygon)[0],
+        )
+        if direction == "vertical"
+        else (
+            _polygon_center(polygon)[0],
+            _polygon_center(polygon)[1],
+        )
+    )
     initial = parsed if len(parsed) == len(tokens) else _equal_character_boxes(tokens, line_poly, direction)
     if image is None or len(tokens) <= 1:
         return initial
@@ -1047,6 +1057,11 @@ def _polygon_bbox(
         right = max(left + 1, min(image_size[0], right))
         bottom = max(top + 1, min(image_size[1], bottom))
     return [left, top, right, bottom]
+
+
+def _polygon_center(polygon: list[list[int]]) -> tuple[float, float]:
+    left, top, right, bottom = _polygon_bbox(polygon, None)
+    return (left + right) / 2, (top + bottom) / 2
 
 
 def _direction_for_polygon(polygon: list[list[int]], text: str) -> str:

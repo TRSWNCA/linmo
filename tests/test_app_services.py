@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import copy
 import os
+import sqlite3
 import tempfile
 import unittest
 import urllib.error
@@ -11,12 +13,28 @@ from PIL import Image, ImageDraw
 
 from linmo_app.api import LinmoApi
 from linmo_app.paths import AppPaths
+from linmo_app.repository import Repository
 from linmo_app.services import LinmoServices, _WebDavClient
 
 os.environ["LINMO_DISABLE_OCR"] = "1"
 
 
 class AppServicesTests(unittest.TestCase):
+    def test_existing_pages_table_migrates_rotation_column(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            database = Path(tmp) / "legacy.sqlite3"
+            with sqlite3.connect(database) as connection:
+                connection.execute("CREATE TABLE pages (id INTEGER PRIMARY KEY)")
+
+            Repository(database)
+
+            with sqlite3.connect(database) as connection:
+                columns = {
+                    row[1]: row[2]
+                    for row in connection.execute("PRAGMA table_info(pages)").fetchall()
+                }
+            self.assertEqual(columns["rotation_degrees"], "REAL")
+
     def test_repository_import_thumbnail_queue_preview_and_export(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -232,6 +250,84 @@ class AppServicesTests(unittest.TestCase):
             self.assertEqual(post["output_format"], "pdf")
             self.assertTrue(Path(post["original_pdf_path"]).exists())
 
+    def test_page_rotation_is_applied_before_visual_crop(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "rotated-page.png"
+            _make_margin_image(source)
+            services = LinmoServices(AppPaths(root / "data"))
+
+            imported = services.import_copybooks([str(source)])
+            page = services.repo.list_pages(imported[0]["id"])[0]
+            detail = services.update_page_crop(
+                page["id"],
+                {
+                    "crop_left_ratio": 0.1,
+                    "crop_right_ratio": 0,
+                    "crop_top_ratio": 0.2,
+                    "crop_bottom_ratio": 0,
+                    "rotation_degrees": 90,
+                },
+            )
+
+            self.assertEqual(detail["rotation_degrees"], 90)
+            transformed = services.load_page_transformed_image(
+                services.repo.get_page_with_copybook(page["id"]),
+                dpi=72,
+            )
+            self.assertEqual(transformed.size, (100, 120))
+            transformed.close()
+
+            cropped = services.load_page_image(
+                services.repo.get_page_with_copybook(page["id"]),
+                dpi=72,
+            )
+            self.assertEqual(cropped.size, (90, 96))
+            cropped.close()
+            analysis = services.analyze_page(page["id"], dpi=72)
+            self.assertEqual(tuple(analysis["image_size"]), (90, 96))
+
+            transform_preview = services.create_page_transform_preview(page["id"])
+            cropped_preview = services.create_page_preview(page["id"])
+            with Image.open(transform_preview) as preview:
+                self.assertEqual(preview.size, (100, 120))
+            with Image.open(cropped_preview) as preview:
+                self.assertEqual(preview.size, (90, 96))
+
+    def test_editing_ocr_box_updates_source_and_selected_stream(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "editable-box.png"
+            _make_ruled_image(source)
+            services = LinmoServices(AppPaths(root / "data"))
+
+            imported = services.import_copybooks([str(source)])
+            page = services.repo.list_pages(imported[0]["id"])[0]
+            analysis = services.analyze_page(page["id"], dpi=72)
+            original = copy.deepcopy(analysis["groups"][0]["glyphs"][0])
+            selected = copy.deepcopy(original)
+            ordered = services.update_page_analysis(
+                page["id"],
+                [{
+                    "id": "selected-stream-1",
+                    "direction": "horizontal",
+                    "included": True,
+                    "glyphs": [selected],
+                }],
+            )
+            self.assertEqual(ordered["selection_mode"], "ordered_stream")
+
+            ocr_groups = copy.deepcopy(ordered["ocr_groups"])
+            edited = ocr_groups[0]["glyphs"][0]
+            edited["text"] = "改"
+            edited["bbox"] = [12, 14, 56, 70]
+            edited["polygon"] = [[12, 14], [56, 14], [56, 70], [12, 70]]
+            saved = services.update_page_ocr_groups(page["id"], ocr_groups)
+
+            self.assertEqual(saved["ocr_groups"][0]["glyphs"][0]["text"], "改")
+            self.assertEqual(saved["groups"][0]["glyphs"][0]["text"], "改")
+            self.assertEqual(saved["groups"][0]["glyphs"][0]["bbox"], [12, 14, 56, 70])
+
     def test_api_start_clears_previous_queue_items(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -283,11 +379,22 @@ class AppServicesTests(unittest.TestCase):
             detail = api.get_page_detail(page["id"])
             self.assertEqual(detail["copybook_title"], imported[0]["title"])
 
-            updated = api.update_page_crop(page["id"], {"crop_left_ratio": 0.1, "crop_right_ratio": 0.05, "crop_top_ratio": 0.15, "crop_bottom_ratio": 0.05})
+            updated = api.update_page_crop(
+                page["id"],
+                {
+                    "crop_left_ratio": 0.1,
+                    "crop_right_ratio": 0.05,
+                    "crop_top_ratio": 0.15,
+                    "crop_bottom_ratio": 0.05,
+                    "rotation_degrees": 1.5,
+                },
+            )
             self.assertAlmostEqual(updated["crop_left_ratio"], 0.1)
             self.assertAlmostEqual(updated["crop_right_ratio"], 0.05)
             self.assertAlmostEqual(updated["crop_top_ratio"], 0.15)
             self.assertAlmostEqual(updated["crop_bottom_ratio"], 0.05)
+            self.assertAlmostEqual(updated["rotation_degrees"], 1.5)
+            self.assertTrue(api.get_page_transform_preview(page["id"]).startswith("data:image/"))
             self.assertTrue(api.get_page_preview(page["id"]).startswith("data:image/"))
 
             analysis = api.analyze_page(page["id"])

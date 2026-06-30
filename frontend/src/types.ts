@@ -28,6 +28,7 @@ export type PageDetail = Page & {
   crop_right_ratio: number;
   crop_top_ratio: number;
   crop_bottom_ratio: number;
+  rotation_degrees: number;
   page_crop_left_ratio?: number;
   page_crop_right_ratio?: number;
   page_crop_top_ratio?: number;
@@ -141,13 +142,16 @@ export type Api = {
     crop_right_ratio: number;
     crop_top_ratio: number;
     crop_bottom_ratio: number;
+    rotation_degrees: number;
   }): Promise<PageDetail>;
   get_copybook_cover(copybook_id: number): Promise<string>;
   get_page_thumbnail(page_id: number): Promise<string>;
   get_page_preview(page_id: number): Promise<string>;
+  get_page_transform_preview(page_id: number): Promise<string>;
   render_page_previews(page_id: number, params: Record<string, unknown>): Promise<string[]>;
   analyze_page(page_id: number, force?: boolean): Promise<PageAnalysis>;
   update_page_analysis(page_id: number, groups: GlyphGroup[]): Promise<PageAnalysis>;
+  update_page_ocr_groups(page_id: number, groups: GlyphGroup[]): Promise<PageAnalysis>;
   export_page_to_generated_post(page_id: number, params: Record<string, unknown>, name: string, output_format?: "pdf" | "png"): Promise<GeneratedPost>;
   add_pages_to_queue(page_ids: number[]): Promise<QueueItem[]>;
   list_queue_items(): Promise<QueueItem[]>;
