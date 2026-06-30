@@ -17,11 +17,12 @@ from pathlib import Path
 from typing import Any
 
 import fitz
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFont
 
 from linmo.glyph_pipeline import (
     ANALYSIS_VERSION,
     analyze_page,
+    _extract_glyph,
     render_practice_pages,
     source_fingerprint,
     update_analysis,
@@ -279,6 +280,228 @@ class LinmoServices:
             updated = update_analysis(analysis, groups=source_groups)
             updated["selection_mode"] = "ocr_groups"
         return self.repo.save_page_analysis(page_id, updated)["analysis"]
+
+    def search_glyphs(
+        self,
+        text: str,
+        copybook_id: int | None = None,
+        author: str = "",
+        limit: int = 60,
+        offset: int = 0,
+    ) -> dict[str, Any]:
+        query = str(text).strip()
+        if len(query) != 1 or not _is_han_character(query):
+            raise ValueError("请输入一个汉字")
+        return self.repo.search_glyphs(
+            query,
+            copybook_id=int(copybook_id) if copybook_id is not None else None,
+            author=str(author),
+            limit=limit,
+            offset=offset,
+        )
+
+    def list_glyph_filters(self, text: str = "") -> dict[str, Any]:
+        query = str(text).strip()
+        if query and (len(query) != 1 or not _is_han_character(query)):
+            raise ValueError("请输入一个汉字")
+        return self.repo.list_glyph_filters(query)
+
+    def glyph_image(self, occurrence_id: int) -> Path:
+        glyph = self.repo.get_glyph_occurrence(int(occurrence_id))
+        cache_key = hashlib.sha1(
+            json.dumps(
+                {
+                    "fingerprint": glyph["source_fingerprint"],
+                    "bbox": glyph["bbox"],
+                    "updated_at": glyph["updated_at"],
+                },
+                sort_keys=True,
+            ).encode("utf-8")
+        ).hexdigest()[:12]
+        path = self.paths.glyphs_dir / f"{int(occurrence_id)}-{cache_key}.png"
+        if path.exists():
+            return path
+
+        page = self.repo.get_page_with_copybook(int(glyph["page_id"]))
+        cached_analysis = self.repo.get_page_analysis(int(glyph["page_id"]))
+        if cached_analysis is None:
+            raise ValueError("单字来源页的识别结果已失效")
+        dpi = int(cached_analysis["analysis"].get("dpi", self.default_params_for_page(int(glyph["page_id"]))["dpi"]))
+        source = self.load_page_image(page, dpi=dpi)
+        left, top, right, bottom = [int(value) for value in glyph["bbox"]]
+        width = max(1, right - left)
+        height = max(1, bottom - top)
+        padding = max(2, round(max(width, height) * 0.04))
+        box = (
+            max(0, left - padding),
+            max(0, top - padding),
+            min(source.width, right + padding),
+            min(source.height, bottom + padding),
+        )
+        if box[2] <= box[0] or box[3] <= box[1]:
+            raise ValueError("单字标注范围无效")
+        crop = source.crop(box).convert("RGB")
+        alpha, ink = _extract_glyph(crop)
+        rgba = Image.new("RGBA", crop.size, (0, 0, 0, 0))
+        rgba.paste(ink.convert("RGB"), (0, 0), alpha)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        for stale_path in self.paths.glyphs_dir.glob(f"{int(occurrence_id)}-*.png"):
+            if stale_path != path:
+                stale_path.unlink()
+        rgba.save(path, "PNG")
+        return path
+
+    def list_collections(self) -> list[dict[str, Any]]:
+        return self.repo.list_collections()
+
+    def create_collection(self, name: str) -> dict[str, Any]:
+        return self.repo.create_collection(name)
+
+    def get_collection(self, collection_id: int) -> dict[str, Any]:
+        collection = self.repo.get_collection(int(collection_id))
+        for item in collection.get("items", []):
+            character = str(item.get("character", ""))
+            if item.get("occurrence_id") is not None and item.get("text") != character:
+                return self.update_collection(int(collection_id), {})
+            if item.get("occurrence_id") is None and _is_han_character(character):
+                if self.repo.search_glyphs(character, limit=1)["items"]:
+                    return self.update_collection(int(collection_id), {})
+        return collection
+
+    def update_collection(self, collection_id: int, data: dict[str, Any]) -> dict[str, Any]:
+        current = self.repo.get_collection(int(collection_id))
+        old_text = str(current.get("input_text", ""))
+        new_text = str(data.get("input_text", old_text))
+        if len(new_text) > 500:
+            raise ValueError("集字内容最多 500 个字符")
+
+        old_selections = {
+            int(item["position"]): item.get("occurrence_id")
+            for item in current.get("items", [])
+        }
+        if new_text == old_text:
+            selections = dict(old_selections)
+        else:
+            selections = {}
+            for old_position, new_position in _matching_text_positions(old_text, new_text):
+                if old_position in old_selections:
+                    selections[new_position] = old_selections[old_position]
+
+        for item in data.get("selections", []) or []:
+            position = int(item["position"])
+            if 0 <= position < len(new_text):
+                selections[position] = item.get("occurrence_id")
+
+        collection_items = []
+        for position, character in enumerate(new_text):
+            if not _is_han_character(character):
+                continue
+            occurrence_id = selections.get(position)
+            if occurrence_id is not None:
+                try:
+                    occurrence = self.repo.get_glyph_occurrence(int(occurrence_id))
+                    if occurrence["text"] != character:
+                        occurrence_id = None
+                except ValueError:
+                    occurrence_id = None
+            if occurrence_id is None:
+                result = self.repo.search_glyphs(character, limit=1)
+                if result["items"]:
+                    occurrence_id = int(result["items"][0]["id"])
+            collection_items.append(
+                {
+                    "position": position,
+                    "character": character,
+                    "occurrence_id": occurrence_id,
+                }
+            )
+
+        payload = {
+            key: data[key]
+            for key in ("name", "input_text", "direction", "line_capacity", "background")
+            if key in data
+        }
+        payload["input_text"] = new_text
+        updated = self.repo.update_collection(int(collection_id), payload, collection_items)
+        preview = self.paths.collection_previews_dir / f"{int(collection_id)}.png"
+        if preview.exists():
+            preview.unlink()
+        return updated
+
+    def delete_collection(self, collection_id: int) -> None:
+        self.repo.delete_collection(int(collection_id))
+        preview = self.paths.collection_previews_dir / f"{int(collection_id)}.png"
+        if preview.exists():
+            preview.unlink()
+
+    def render_collection_preview(self, collection_id: int) -> Path:
+        path = self.paths.collection_previews_dir / f"{int(collection_id)}.png"
+        if path.exists():
+            return path
+        image = self._render_collection(int(collection_id))
+        image.thumbnail((1400, 1000), Image.Resampling.LANCZOS)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        image.save(path, "PNG")
+        return path
+
+    def export_collection_png(self, collection_id: int) -> Path:
+        collection = self.repo.get_collection(int(collection_id))
+        image = self._render_collection(int(collection_id))
+        export_dir = Path(
+            self.repo.get_settings().get("default_export_dir", str(self.paths.exports_dir))
+        ).expanduser()
+        export_dir.mkdir(parents=True, exist_ok=True)
+        base_name = _safe_file_name(str(collection["name"])) or "集字"
+        path = export_dir / f"{base_name}.png"
+        suffix = 2
+        while path.exists():
+            path = export_dir / f"{base_name}-{suffix}.png"
+            suffix += 1
+        image.save(path, "PNG")
+        return path
+
+    def _render_collection(self, collection_id: int) -> Image.Image:
+        collection = self.get_collection(collection_id)
+        text = str(collection["input_text"])
+        capacity = max(1, int(collection["line_capacity"]))
+        direction = str(collection["direction"])
+        positions = _collection_layout(text, direction, capacity)
+        cell = 256
+        margin = 24
+        max_column = max((column for _, _, column, _ in positions), default=0)
+        max_row = max((row for _, _, _, row in positions), default=0)
+        width = max(cell, (max_column + 1) * cell) + margin * 2
+        height = max(cell, (max_row + 1) * cell) + margin * 2
+        background = (255, 255, 255, 255) if collection["background"] == "white" else (0, 0, 0, 0)
+        output = Image.new("RGBA", (width, height), background)
+        draw = ImageDraw.Draw(output)
+        font = _collection_font(round(cell * 0.58))
+        item_map = {int(item["position"]): item for item in collection["items"]}
+
+        for position, character, column, row in positions:
+            x = margin + column * cell
+            y = margin + row * cell
+            if _is_han_character(character):
+                item = item_map.get(position)
+                occurrence_id = item.get("occurrence_id") if item else None
+                if occurrence_id is None:
+                    draw.rectangle(
+                        (x + 18, y + 18, x + cell - 18, y + cell - 18),
+                        outline=(150, 150, 150, 220),
+                        width=3,
+                    )
+                    _draw_centered_text(draw, (x, y, x + cell, y + cell), character, font, (140, 140, 140, 230))
+                    continue
+                with Image.open(self.glyph_image(int(occurrence_id))) as glyph_source:
+                    glyph = glyph_source.convert("RGBA")
+                glyph.thumbnail((round(cell * 0.88), round(cell * 0.88)), Image.Resampling.LANCZOS)
+                output.alpha_composite(
+                    glyph,
+                    (x + (cell - glyph.width) // 2, y + (cell - glyph.height) // 2),
+                )
+            elif not character.isspace():
+                _draw_centered_text(draw, (x, y, x + cell, y + cell), character, font, (32, 32, 32, 255))
+        return output
 
     def render_page_previews(
         self,
@@ -693,6 +916,7 @@ class LinmoServices:
             self._invalidate_page_caches(page_id)
 
     def _invalidate_page_caches(self, page_id: int) -> None:
+        occurrence_ids = self.repo.list_page_glyph_occurrence_ids(page_id)
         for path in (
             self.paths.thumbs_dir / f"{page_id}.jpg",
             self.paths.previews_dir / f"source-{page_id}.jpg",
@@ -702,6 +926,10 @@ class LinmoServices:
                 path.unlink()
         for path in self.paths.previews_dir.glob(f"page-{page_id}-*.jpg"):
             path.unlink()
+        for occurrence_id in occurrence_ids:
+            for path in self.paths.glyphs_dir.glob(f"{occurrence_id}-*.png"):
+                path.unlink()
+        self.repo.delete_page_analysis(page_id)
 
     def _new_copybook_dir(self) -> Path:
         stamp = f"{int(time.time() * 1000)}"
@@ -817,6 +1045,105 @@ def file_to_data_url(path: Path) -> str:
         mime = "image/png"
     encoded = base64.b64encode(path.read_bytes()).decode("ascii")
     return f"data:{mime};base64,{encoded}"
+
+
+def _is_han_character(value: str) -> bool:
+    if len(value) != 1:
+        return False
+    codepoint = ord(value)
+    return (
+        0x3400 <= codepoint <= 0x4DBF
+        or 0x4E00 <= codepoint <= 0x9FFF
+        or 0xF900 <= codepoint <= 0xFAFF
+        or 0x20000 <= codepoint <= 0x323AF
+    )
+
+
+def _matching_text_positions(old: str, new: str) -> list[tuple[int, int]]:
+    old_length = len(old)
+    new_length = len(new)
+    table = [[0] * (new_length + 1) for _ in range(old_length + 1)]
+    for old_index in range(old_length - 1, -1, -1):
+        for new_index in range(new_length - 1, -1, -1):
+            if old[old_index] == new[new_index]:
+                table[old_index][new_index] = table[old_index + 1][new_index + 1] + 1
+            else:
+                table[old_index][new_index] = max(
+                    table[old_index + 1][new_index],
+                    table[old_index][new_index + 1],
+                )
+    matches = []
+    old_index = 0
+    new_index = 0
+    while old_index < old_length and new_index < new_length:
+        if old[old_index] == new[new_index]:
+            matches.append((old_index, new_index))
+            old_index += 1
+            new_index += 1
+        elif table[old_index + 1][new_index] >= table[old_index][new_index + 1]:
+            old_index += 1
+        else:
+            new_index += 1
+    return matches
+
+
+def _collection_layout(
+    text: str,
+    direction: str,
+    capacity: int,
+) -> list[tuple[int, str, int, int]]:
+    positions: list[tuple[int, str, int, int]] = []
+    major = 0
+    minor = 0
+    for position, character in enumerate(text):
+        if character == "\n":
+            major += 1
+            minor = 0
+            continue
+        if minor >= capacity:
+            major += 1
+            minor = 0
+        if direction == "vertical":
+            column, row = major, minor
+        else:
+            column, row = minor, major
+        positions.append((position, character, column, row))
+        minor += 1
+    return positions
+
+
+def _collection_font(size: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
+    candidates = [
+        "C:/Windows/Fonts/msyh.ttc",
+        "C:/Windows/Fonts/simsun.ttc",
+        "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    ]
+    for candidate in candidates:
+        if Path(candidate).exists():
+            return ImageFont.truetype(candidate, size=size)
+    return ImageFont.load_default()
+
+
+def _draw_centered_text(
+    draw: ImageDraw.ImageDraw,
+    box: tuple[int, int, int, int],
+    text: str,
+    font: ImageFont.FreeTypeFont | ImageFont.ImageFont,
+    fill: tuple[int, int, int, int],
+) -> None:
+    bounds = draw.textbbox((0, 0), text, font=font)
+    text_width = bounds[2] - bounds[0]
+    text_height = bounds[3] - bounds[1]
+    x = box[0] + (box[2] - box[0] - text_width) // 2 - bounds[0]
+    y = box[1] + (box[3] - box[1] - text_height) // 2 - bounds[1]
+    draw.text((x, y), text, font=font, fill=fill)
+
+
+def _safe_file_name(value: str) -> str:
+    cleaned = "".join("_" if char in '<>:"/\\|?*' else char for char in value.strip())
+    return cleaned.rstrip(". ")
 
 
 def _queue_preview_cache_key(item: dict[str, Any], page: dict[str, Any]) -> str:

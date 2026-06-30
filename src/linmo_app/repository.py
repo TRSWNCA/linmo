@@ -98,6 +98,48 @@ CREATE TABLE IF NOT EXISTS generated_posts (
     updated_at INTEGER NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS glyph_occurrences (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    page_id INTEGER NOT NULL REFERENCES page_analyses(page_id) ON DELETE CASCADE,
+    glyph_id TEXT NOT NULL,
+    text TEXT NOT NULL,
+    confidence REAL NOT NULL DEFAULT 0,
+    bbox_json TEXT NOT NULL,
+    analysis_status TEXT NOT NULL DEFAULT 'ready',
+    source_fingerprint TEXT NOT NULL DEFAULT '',
+    updated_at INTEGER NOT NULL,
+    UNIQUE(page_id, glyph_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_glyph_occurrences_text
+    ON glyph_occurrences(text);
+CREATE INDEX IF NOT EXISTS idx_glyph_occurrences_page
+    ON glyph_occurrences(page_id);
+
+CREATE TABLE IF NOT EXISTS glyph_index_state (
+    page_id INTEGER PRIMARY KEY REFERENCES page_analyses(page_id) ON DELETE CASCADE,
+    analysis_updated_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS collections (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    input_text TEXT NOT NULL DEFAULT '',
+    direction TEXT NOT NULL DEFAULT 'horizontal',
+    line_capacity INTEGER NOT NULL DEFAULT 8,
+    background TEXT NOT NULL DEFAULT 'transparent',
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS collection_items (
+    collection_id INTEGER NOT NULL REFERENCES collections(id) ON DELETE CASCADE,
+    position INTEGER NOT NULL,
+    character TEXT NOT NULL,
+    occurrence_id INTEGER REFERENCES glyph_occurrences(id) ON DELETE SET NULL,
+    PRIMARY KEY(collection_id, position)
+);
+
 CREATE TABLE IF NOT EXISTS settings (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
@@ -142,6 +184,7 @@ class Repository:
             _ensure_column(conn, "generated_posts", "sync_status", "TEXT NOT NULL DEFAULT 'local'")
             _ensure_column(conn, "generated_posts", "remote_path", "TEXT NOT NULL DEFAULT ''")
             _ensure_column(conn, "generated_posts", "last_synced_at", "INTEGER NOT NULL DEFAULT 0")
+            self._backfill_glyph_index(conn)
 
     def stats(self) -> dict[str, int]:
         with self.connect() as conn:
@@ -301,6 +344,7 @@ class Repository:
                     now,
                 ),
             )
+            self._sync_page_glyphs(conn, page_id, analysis, now)
         saved = self.get_page_analysis(page_id)
         assert saved is not None
         return saved
@@ -308,6 +352,316 @@ class Repository:
     def delete_page_analysis(self, page_id: int) -> None:
         with self.connect() as conn:
             conn.execute("DELETE FROM page_analyses WHERE page_id = ?", (page_id,))
+
+    def _backfill_glyph_index(self, conn: sqlite3.Connection) -> None:
+        rows = conn.execute(
+            """
+            SELECT pa.page_id, pa.analysis_json, pa.updated_at
+            FROM page_analyses pa
+            LEFT JOIN glyph_index_state gis ON gis.page_id = pa.page_id
+            WHERE gis.page_id IS NULL OR gis.analysis_updated_at != pa.updated_at
+            """
+        ).fetchall()
+        for row in rows:
+            try:
+                analysis = json.loads(row["analysis_json"])
+            except (TypeError, json.JSONDecodeError):
+                continue
+            self._sync_page_glyphs(
+                conn,
+                int(row["page_id"]),
+                analysis,
+                int(row["updated_at"]),
+            )
+
+    def _sync_page_glyphs(
+        self,
+        conn: sqlite3.Connection,
+        page_id: int,
+        analysis: dict[str, Any],
+        updated_at: int,
+    ) -> None:
+        glyph_ids: list[str] = []
+        groups = analysis.get("ocr_groups") or analysis.get("groups") or []
+        status = str(analysis.get("status", "ready"))
+        fingerprint = str(analysis.get("source_fingerprint", ""))
+        for group in groups:
+            for glyph in group.get("glyphs", []):
+                if glyph.get("kind") == "punctuation":
+                    continue
+                text = str(glyph.get("text", "")).strip()
+                glyph_id = str(glyph.get("id", ""))
+                bbox = glyph.get("bbox")
+                if not text or not glyph_id or not isinstance(bbox, list) or len(bbox) != 4:
+                    continue
+                glyph_ids.append(glyph_id)
+                conn.execute(
+                    """
+                    INSERT INTO glyph_occurrences
+                        (page_id, glyph_id, text, confidence, bbox_json,
+                         analysis_status, source_fingerprint, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(page_id, glyph_id) DO UPDATE SET
+                        text = excluded.text,
+                        confidence = excluded.confidence,
+                        bbox_json = excluded.bbox_json,
+                        analysis_status = excluded.analysis_status,
+                        source_fingerprint = excluded.source_fingerprint,
+                        updated_at = excluded.updated_at
+                    """,
+                    (
+                        page_id,
+                        glyph_id,
+                        text,
+                        float(glyph.get("confidence", 0) or 0),
+                        json.dumps([int(round(float(value))) for value in bbox]),
+                        status,
+                        fingerprint,
+                        updated_at,
+                    ),
+                )
+        if glyph_ids:
+            placeholders = ", ".join("?" for _ in glyph_ids)
+            conn.execute(
+                f"DELETE FROM glyph_occurrences WHERE page_id = ? AND glyph_id NOT IN ({placeholders})",
+                [page_id, *glyph_ids],
+            )
+        else:
+            conn.execute("DELETE FROM glyph_occurrences WHERE page_id = ?", (page_id,))
+        conn.execute(
+            """
+            INSERT INTO glyph_index_state (page_id, analysis_updated_at)
+            VALUES (?, ?)
+            ON CONFLICT(page_id) DO UPDATE SET
+                analysis_updated_at = excluded.analysis_updated_at
+            """,
+            (page_id, updated_at),
+        )
+
+    def search_glyphs(
+        self,
+        text: str,
+        *,
+        copybook_id: int | None = None,
+        author: str = "",
+        limit: int = 60,
+        offset: int = 0,
+    ) -> dict[str, Any]:
+        clauses = ["go.text = ?"]
+        values: list[Any] = [text]
+        if copybook_id is not None:
+            clauses.append("c.id = ?")
+            values.append(int(copybook_id))
+        if author:
+            clauses.append("c.author = ?")
+            values.append(author)
+        where = " AND ".join(clauses)
+        with self.connect() as conn:
+            total = int(
+                conn.execute(
+                    f"""
+                    SELECT COUNT(*)
+                    FROM glyph_occurrences go
+                    JOIN pages p ON p.id = go.page_id
+                    JOIN copybooks c ON c.id = p.copybook_id
+                    WHERE {where}
+                    """,
+                    values,
+                ).fetchone()[0]
+            )
+            rows = conn.execute(
+                f"""
+                SELECT go.*, p.page_no, p.copybook_id,
+                       c.title AS copybook_title, c.author AS copybook_author
+                FROM glyph_occurrences go
+                JOIN pages p ON p.id = go.page_id
+                JOIN copybooks c ON c.id = p.copybook_id
+                WHERE {where}
+                ORDER BY CASE WHEN go.analysis_status = 'reviewed' THEN 0 ELSE 1 END,
+                         go.confidence DESC, c.updated_at DESC, go.id
+                LIMIT ? OFFSET ?
+                """,
+                [*values, max(1, min(int(limit), 200)), max(0, int(offset))],
+            ).fetchall()
+        return {"items": [_decode_glyph(row) for row in rows], "total": total}
+
+    def get_glyph_occurrence(self, occurrence_id: int) -> dict[str, Any]:
+        with self.connect() as conn:
+            row = conn.execute(
+                """
+                SELECT go.*, p.page_no, p.copybook_id,
+                       c.title AS copybook_title, c.author AS copybook_author
+                FROM glyph_occurrences go
+                JOIN pages p ON p.id = go.page_id
+                JOIN copybooks c ON c.id = p.copybook_id
+                WHERE go.id = ?
+                """,
+                (occurrence_id,),
+            ).fetchone()
+        if row is None:
+            raise ValueError(f"glyph occurrence not found: {occurrence_id}")
+        return _decode_glyph(row)
+
+    def list_page_glyph_occurrence_ids(self, page_id: int) -> list[int]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                "SELECT id FROM glyph_occurrences WHERE page_id = ?",
+                (page_id,),
+            ).fetchall()
+        return [int(row["id"]) for row in rows]
+
+    def list_glyph_filters(self, text: str = "") -> dict[str, Any]:
+        where = "WHERE go.text = ?" if text else ""
+        values = [text] if text else []
+        with self.connect() as conn:
+            copybooks = conn.execute(
+                f"""
+                SELECT c.id, c.title, c.author, COUNT(*) AS glyph_count
+                FROM glyph_occurrences go
+                JOIN pages p ON p.id = go.page_id
+                JOIN copybooks c ON c.id = p.copybook_id
+                {where}
+                GROUP BY c.id
+                ORDER BY c.title, c.id
+                """,
+                values,
+            ).fetchall()
+            authors = conn.execute(
+                f"""
+                SELECT c.author, COUNT(*) AS glyph_count
+                FROM glyph_occurrences go
+                JOIN pages p ON p.id = go.page_id
+                JOIN copybooks c ON c.id = p.copybook_id
+                {where}
+                AND c.author != ''
+                GROUP BY c.author
+                ORDER BY c.author
+                """ if where else """
+                SELECT c.author, COUNT(*) AS glyph_count
+                FROM glyph_occurrences go
+                JOIN pages p ON p.id = go.page_id
+                JOIN copybooks c ON c.id = p.copybook_id
+                WHERE c.author != ''
+                GROUP BY c.author
+                ORDER BY c.author
+                """,
+                values,
+            ).fetchall()
+        return {
+            "copybooks": [_row_to_dict(row) for row in copybooks],
+            "authors": [_row_to_dict(row) for row in authors],
+        }
+
+    def list_collections(self) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM collections ORDER BY updated_at DESC, id DESC"
+            ).fetchall()
+        return [_row_to_dict(row) for row in rows]
+
+    def create_collection(self, name: str) -> dict[str, Any]:
+        normalized = name.strip()
+        if not normalized:
+            raise ValueError("集字方案名称不能为空")
+        now = _now()
+        with self.connect() as conn:
+            cur = conn.execute(
+                """
+                INSERT INTO collections
+                    (name, input_text, direction, line_capacity, background, created_at, updated_at)
+                VALUES (?, '', 'horizontal', 8, 'transparent', ?, ?)
+                """,
+                (normalized, now, now),
+            )
+            collection_id = int(cur.lastrowid)
+        return self.get_collection(collection_id)
+
+    def get_collection(self, collection_id: int) -> dict[str, Any]:
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM collections WHERE id = ?", (collection_id,)
+            ).fetchone()
+            items = conn.execute(
+                """
+                SELECT ci.position, ci.character, ci.occurrence_id,
+                       go.text, go.confidence, go.page_id,
+                       p.page_no, c.id AS copybook_id,
+                       c.title AS copybook_title, c.author AS copybook_author
+                FROM collection_items ci
+                LEFT JOIN glyph_occurrences go ON go.id = ci.occurrence_id
+                LEFT JOIN pages p ON p.id = go.page_id
+                LEFT JOIN copybooks c ON c.id = p.copybook_id
+                WHERE ci.collection_id = ?
+                ORDER BY ci.position
+                """,
+                (collection_id,),
+            ).fetchall()
+        if row is None:
+            raise ValueError(f"collection not found: {collection_id}")
+        result = _row_to_dict(row)
+        result["items"] = [_row_to_dict(item) for item in items]
+        return result
+
+    def update_collection(
+        self,
+        collection_id: int,
+        data: dict[str, Any],
+        items: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        current = self.get_collection(collection_id)
+        merged = {**current, **data}
+        name = str(merged["name"]).strip()
+        if not name:
+            raise ValueError("集字方案名称不能为空")
+        direction = str(merged.get("direction", "horizontal"))
+        background = str(merged.get("background", "transparent"))
+        if direction not in {"horizontal", "vertical"}:
+            raise ValueError("不支持的集字方向")
+        if background not in {"transparent", "white"}:
+            raise ValueError("不支持的集字背景")
+        capacity = max(1, min(int(merged.get("line_capacity", 8)), 50))
+        with self.connect() as conn:
+            conn.execute(
+                """
+                UPDATE collections
+                SET name = ?, input_text = ?, direction = ?, line_capacity = ?,
+                    background = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    name,
+                    str(merged.get("input_text", "")),
+                    direction,
+                    capacity,
+                    background,
+                    _now(),
+                    collection_id,
+                ),
+            )
+            if items is not None:
+                conn.execute(
+                    "DELETE FROM collection_items WHERE collection_id = ?",
+                    (collection_id,),
+                )
+                for item in items:
+                    conn.execute(
+                        """
+                        INSERT INTO collection_items
+                            (collection_id, position, character, occurrence_id)
+                        VALUES (?, ?, ?, ?)
+                        """,
+                        (
+                            collection_id,
+                            int(item["position"]),
+                            str(item["character"]),
+                            int(item["occurrence_id"]) if item.get("occurrence_id") is not None else None,
+                        ),
+                    )
+        return self.get_collection(collection_id)
+
+    def delete_collection(self, collection_id: int) -> None:
+        with self.connect() as conn:
+            conn.execute("DELETE FROM collections WHERE id = ?", (collection_id,))
 
     def list_pages(self, copybook_id: int) -> list[dict[str, Any]]:
         with self.connect() as conn:
@@ -617,6 +971,12 @@ def _ensure_column(conn: sqlite3.Connection, table: str, column: str, definition
 
 def _row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
     return {key: row[key] for key in row.keys()}
+
+
+def _decode_glyph(row: sqlite3.Row) -> dict[str, Any]:
+    data = _row_to_dict(row)
+    data["bbox"] = json.loads(data.pop("bbox_json"))
+    return data
 
 
 def _decode_params(data: dict[str, Any]) -> dict[str, Any]:

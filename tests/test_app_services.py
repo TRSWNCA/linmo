@@ -462,6 +462,112 @@ class AppServicesTests(unittest.TestCase):
             self.assertTrue(api.delete_preset(preset["id"])["ok"])
             self.assertEqual(api.list_presets(), [])
 
+    def test_glyph_index_search_updates_and_renders_cached_image(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "glyphs.png"
+            _make_ruled_image(source)
+            services = LinmoServices(AppPaths(root / "data"))
+            imported = services.import_copybooks([str(source)])
+            services.update_copybook_metadata(
+                imported[0]["id"],
+                {"title": "测试帖", "author": "测试作者"},
+            )
+            page = services.repo.list_pages(imported[0]["id"])[0]
+            analysis = _sample_glyph_analysis()
+
+            services.repo.save_page_analysis(page["id"], analysis)
+            result = services.search_glyphs("林")
+            self.assertEqual(result["total"], 1)
+            self.assertEqual(result["items"][0]["copybook_title"], "测试帖")
+            self.assertEqual(result["items"][0]["copybook_author"], "测试作者")
+            filters = services.list_glyph_filters("林")
+            self.assertEqual(filters["copybooks"][0]["glyph_count"], 1)
+            self.assertEqual(filters["authors"][0]["author"], "测试作者")
+
+            glyph_path = services.glyph_image(result["items"][0]["id"])
+            self.assertTrue(glyph_path.exists())
+            with Image.open(glyph_path) as image:
+                self.assertEqual(image.mode, "RGBA")
+            self.assertEqual(glyph_path, services.glyph_image(result["items"][0]["id"]))
+
+            analysis["groups"][0]["glyphs"][0]["text"] = "墨"
+            analysis["status"] = "reviewed"
+            services.repo.save_page_analysis(page["id"], analysis)
+            self.assertEqual(services.search_glyphs("林")["total"], 0)
+            updated = services.search_glyphs("墨")
+            self.assertEqual(updated["total"], 2)
+            self.assertEqual(updated["items"][0]["analysis_status"], "reviewed")
+
+            with services.repo.connect() as connection:
+                connection.execute("DELETE FROM glyph_index_state")
+                connection.execute("DELETE FROM glyph_occurrences")
+            Repository(services.paths.db_path)
+            self.assertEqual(services.search_glyphs("墨")["total"], 2)
+
+            services.update_page_crop(
+                page["id"],
+                {
+                    "crop_left_ratio": 0.05,
+                    "crop_right_ratio": 0,
+                    "crop_top_ratio": 0,
+                    "crop_bottom_ratio": 0,
+                    "rotation_degrees": 0,
+                },
+            )
+            self.assertEqual(services.search_glyphs("墨")["total"], 0)
+
+    def test_collection_reconciles_selections_and_exports_both_backgrounds(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "glyphs.png"
+            _make_ruled_image(source)
+            services = LinmoServices(AppPaths(root / "data"))
+            imported = services.import_copybooks([str(source)])
+            page = services.repo.list_pages(imported[0]["id"])[0]
+            analysis = _sample_glyph_analysis()
+            analysis["groups"][0]["glyphs"][0]["text"] = "墨"
+            services.repo.save_page_analysis(page["id"], analysis)
+
+            collection = services.create_collection("测试集字")
+            collection = services.update_collection(
+                collection["id"],
+                {"input_text": "墨，墨", "direction": "horizontal", "line_capacity": 2},
+            )
+            self.assertEqual([item["position"] for item in collection["items"]], [0, 2])
+            choices = services.search_glyphs("墨")["items"]
+            self.assertEqual(len(choices), 2)
+
+            collection = services.update_collection(
+                collection["id"],
+                {"selections": [{"position": 2, "occurrence_id": choices[1]["id"]}]},
+            )
+            selected = next(item for item in collection["items"] if item["position"] == 2)
+            self.assertEqual(selected["occurrence_id"], choices[1]["id"])
+
+            collection = services.update_collection(
+                collection["id"],
+                {"input_text": "书墨，墨", "direction": "vertical", "background": "white"},
+            )
+            moved = next(item for item in collection["items"] if item["position"] == 3)
+            self.assertEqual(moved["occurrence_id"], choices[1]["id"])
+            self.assertIsNone(next(item for item in collection["items"] if item["position"] == 0)["occurrence_id"])
+
+            preview = services.render_collection_preview(collection["id"])
+            self.assertTrue(preview.exists())
+            exported = services.export_collection_png(collection["id"])
+            self.assertTrue(exported.exists())
+            with Image.open(exported) as image:
+                self.assertEqual(image.getpixel((0, 0)), (255, 255, 255, 255))
+
+            collection = services.update_collection(
+                collection["id"],
+                {"background": "transparent"},
+            )
+            transparent = services.export_collection_png(collection["id"])
+            with Image.open(transparent) as image:
+                self.assertEqual(image.getpixel((0, 0))[3], 0)
+
     def test_webdav_treats_gone_collection_as_missing_and_uses_collection_urls(self) -> None:
         client = _WebDavClient.__new__(_WebDavClient)
         client.base_url = "https://dav.example.test/dav/"
@@ -500,6 +606,44 @@ def _make_pdf(path: Path) -> None:
         page.insert_text((60, 120), f"Page {index + 1}", fontsize=24)
     document.save(path)
     document.close()
+
+
+def _sample_glyph_analysis() -> dict:
+    return {
+        "version": 1,
+        "model_id": "test",
+        "engine": "test",
+        "status": "ready",
+        "selection_mode": "ocr_groups",
+        "image_size": [360, 260],
+        "source_fingerprint": "test-fingerprint",
+        "dpi": 72,
+        "groups": [
+            {
+                "id": "line-1",
+                "direction": "horizontal",
+                "included": True,
+                "glyphs": [
+                    {
+                        "id": "glyph-1",
+                        "text": "林",
+                        "confidence": 0.95,
+                        "bbox": [36, 55, 88, 88],
+                        "included": True,
+                        "kind": "character",
+                    },
+                    {
+                        "id": "glyph-2",
+                        "text": "墨",
+                        "confidence": 0.85,
+                        "bbox": [90, 55, 142, 88],
+                        "included": True,
+                        "kind": "character",
+                    },
+                ],
+            }
+        ],
+    }
 
 
 class _FakeWebDavOpener:

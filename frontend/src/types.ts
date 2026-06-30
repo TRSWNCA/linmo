@@ -73,6 +73,45 @@ export type PageAnalysis = {
   ocr_groups?: GlyphGroup[];
 };
 
+export type GlyphOccurrence = {
+  id: number;
+  page_id: number;
+  glyph_id: string;
+  text: string;
+  confidence: number;
+  bbox: [number, number, number, number];
+  analysis_status: string;
+  copybook_id: number;
+  copybook_title: string;
+  copybook_author: string;
+  page_no: number;
+};
+
+export type CollectionItem = {
+  position: number;
+  character: string;
+  occurrence_id: number | null;
+  text?: string | null;
+  confidence?: number | null;
+  page_id?: number | null;
+  page_no?: number | null;
+  copybook_id?: number | null;
+  copybook_title?: string | null;
+  copybook_author?: string | null;
+};
+
+export type Collection = {
+  id: number;
+  name: string;
+  input_text: string;
+  direction: "horizontal" | "vertical";
+  line_capacity: number;
+  background: "transparent" | "white";
+  created_at: number;
+  updated_at: number;
+  items?: CollectionItem[];
+};
+
 export type RuntimeLogEntry = {
   id: number;
   timestamp: number;
@@ -152,6 +191,20 @@ export type Api = {
   analyze_page(page_id: number, force?: boolean): Promise<PageAnalysis>;
   update_page_analysis(page_id: number, groups: GlyphGroup[]): Promise<PageAnalysis>;
   update_page_ocr_groups(page_id: number, groups: GlyphGroup[]): Promise<PageAnalysis>;
+  search_glyphs(text: string, copybook_id?: number | null, author?: string, limit?: number, offset?: number): Promise<{ items: GlyphOccurrence[]; total: number }>;
+  list_glyph_filters(text?: string): Promise<{
+    copybooks: Array<{ id: number; title: string; author: string; glyph_count: number }>;
+    authors: Array<{ author: string; glyph_count: number }>;
+  }>;
+  get_glyph_image(occurrence_id: number): Promise<string>;
+  list_collections(): Promise<Collection[]>;
+  create_collection(name: string): Promise<Collection>;
+  get_collection(collection_id: number): Promise<Collection>;
+  update_collection(collection_id: number, data: Partial<Collection> & { selections?: Array<{ position: number; occurrence_id: number | null }> }): Promise<Collection>;
+  rename_collection(collection_id: number, name: string): Promise<Collection>;
+  delete_collection(collection_id: number): Promise<{ ok: boolean }>;
+  render_collection_preview(collection_id: number): Promise<string>;
+  export_collection_png(collection_id: number): Promise<{ output_path: string }>;
   export_page_to_generated_post(page_id: number, params: Record<string, unknown>, name: string, output_format?: "pdf" | "png"): Promise<GeneratedPost>;
   add_pages_to_queue(page_ids: number[]): Promise<QueueItem[]>;
   list_queue_items(): Promise<QueueItem[]>;

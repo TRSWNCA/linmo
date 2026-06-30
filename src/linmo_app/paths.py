@@ -30,6 +30,14 @@ class AppPaths:
         return self.root / "cache" / "generated-thumbs"
 
     @property
+    def glyphs_dir(self) -> Path:
+        return self.root / "cache" / "glyphs"
+
+    @property
+    def collection_previews_dir(self) -> Path:
+        return self.root / "cache" / "collection-previews"
+
+    @property
     def presets_dir(self) -> Path:
         return self.root / "presets"
 
@@ -56,6 +64,8 @@ class AppPaths:
             self.thumbs_dir,
             self.previews_dir,
             self.generated_thumbs_dir,
+            self.glyphs_dir,
+            self.collection_previews_dir,
             self.presets_dir,
             self.exports_dir,
             self.generated_dir,
