@@ -91,6 +91,29 @@ class GlyphPipelineTests(unittest.TestCase):
         self.assertGreaterEqual(boxes[2][0], 178)
         self.assertGreater(boxes[0][2] - boxes[0][0], boxes[1][2] - boxes[1][0] + 40)
 
+    def test_colored_frame_lines_are_excluded_from_character_boxes(self) -> None:
+        image = Image.new("RGB", (240, 110), "white")
+        draw = ImageDraw.Draw(image)
+        draw.rectangle((12, 22, 66, 86), fill="black")
+        draw.rectangle((92, 28, 126, 80), fill="black")
+        draw.rectangle((168, 18, 210, 90), fill="black")
+        draw.line((0, 100, 239, 100), fill=(210, 52, 52), width=3)
+        draw.line((236, 0, 236, 109), fill=(210, 52, 52), width=3)
+
+        analysis = analysis_from_ocr_payload(
+            {
+                "rec_texts": ["甲乙丙"],
+                "rec_scores": [0.96],
+                "rec_polys": [[[0, 5], [239, 5], [239, 105], [0, 105]]],
+            },
+            image.size,
+            image=image,
+        )
+
+        boxes = [glyph["bbox"] for glyph in analysis["groups"][0]["glyphs"]]
+        self.assertLessEqual(boxes[2][2], 213)
+        self.assertLessEqual(max(box[3] for box in boxes), 93)
+
     def test_vertical_groups_are_ordered_right_to_left(self) -> None:
         analysis = analysis_from_ocr_payload(
             {
@@ -297,6 +320,18 @@ class GlyphPipelineTests(unittest.TestCase):
         self.assertEqual(int(alpha_pixels[45, 45]), 0)
         self.assertGreater(int(alpha_pixels[24, 24]), 180)
         self.assertLess(int(ink_pixels[24, 24]), 80)
+
+    def test_extract_glyph_removes_different_colored_frame_line(self) -> None:
+        crop = Image.new("RGB", (80, 64), "white")
+        draw = ImageDraw.Draw(crop)
+        draw.rectangle((24, 12, 58, 54), fill=(24, 24, 24))
+        draw.line((5, 0, 5, 63), fill=(210, 52, 52), width=3)
+
+        alpha, _ = _extract_glyph(crop)
+        pixels = np.asarray(alpha)
+
+        self.assertEqual(int(pixels[32, 5]), 0)
+        self.assertGreater(int(pixels[32, 40]), 180)
 
 
 def _analysis(count: int) -> dict:

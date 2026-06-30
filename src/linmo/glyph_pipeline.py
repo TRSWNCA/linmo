@@ -14,7 +14,7 @@ from PIL import Image, ImageDraw, ImageFilter
 from .runtime import add_runtime_log, log_exception
 
 
-ANALYSIS_VERSION = 2
+ANALYSIS_VERSION = 3
 OCR_MODEL_ID = "PP-OCRv6_medium"
 
 
@@ -529,7 +529,7 @@ def _paste_glyph(
         min(source.width, right + padding),
         min(source.height, bottom + padding),
     )
-    crop = source.crop(crop_box).convert("L")
+    crop = source.crop(crop_box).convert("RGB")
     alpha, ink = _extract_glyph(crop)
     max_size = round(cell * 0.92)
     scale = min(
@@ -560,6 +560,8 @@ def _common_glyph_scale(logical_lines: list[list[dict[str, Any]]], cell: int) ->
 
 
 def _extract_glyph(crop: Image.Image) -> tuple[Image.Image, Image.Image]:
+    color_mask = _color_aware_ink_mask(crop)
+    crop = crop.convert("L")
     short = max(1, min(crop.size))
     gray = np.asarray(crop, dtype=np.int16)
     corner_width = max(1, round(short * 0.025))
@@ -594,6 +596,7 @@ def _extract_glyph(crop: Image.Image) -> tuple[Image.Image, Image.Image]:
     # a slightly thinner stroke for practice sheets.
     low_alpha_cutoff = max(28, min(72, threshold * 2))
     alpha = np.where(alpha >= low_alpha_cutoff, alpha, 0).astype(np.uint8)
+    alpha = np.where(color_mask, alpha, 0).astype(np.uint8)
     alpha_image = (
         Image.fromarray(alpha, "L")
         .filter(ImageFilter.MaxFilter(3))
@@ -718,7 +721,7 @@ def _refine_character_boxes_from_ink(
     left, top, right, bottom = _polygon_bbox(line_poly, image.size)
     if right - left < 2 or bottom - top < 2:
         return initial_boxes
-    crop = image.crop((left, top, right, bottom)).convert("L")
+    crop = image.crop((left, top, right, bottom)).convert("RGB")
     ink = _line_ink_mask(crop)
     vertical = direction == "vertical"
     projection = ink.sum(axis=1 if vertical else 0).astype(np.float64)
@@ -779,16 +782,147 @@ def _refine_character_boxes_from_ink(
     return refined
 
 
+def _color_aware_ink_mask(crop: Image.Image) -> np.ndarray:
+    rgb = np.asarray(crop.convert("RGB"), dtype=np.float64)
+    height, width = rgb.shape[:2]
+    if not height or not width:
+        return np.zeros((height, width), dtype=bool)
+    border = max(1, round(min(width, height) * 0.04))
+    border_samples = np.concatenate(
+        (
+            rgb[:border, :, :].reshape(-1, 3),
+            rgb[-border:, :, :].reshape(-1, 3),
+            rgb[:, :border, :].reshape(-1, 3),
+            rgb[:, -border:, :].reshape(-1, 3),
+        ),
+        axis=0,
+    )
+    background = np.median(border_samples, axis=0)
+    delta = background.reshape(1, 1, 3) - rgb
+    distance = np.linalg.norm(delta, axis=2)
+    normalized_distance = np.clip(distance / math.sqrt(3), 0, 255).astype(np.uint8)
+    threshold = max(8, _otsu_threshold(normalized_distance))
+    foreground = normalized_distance >= threshold
+    if int(foreground.sum()) < 12:
+        return foreground
+
+    vectors = delta[foreground]
+    norms = np.linalg.norm(vectors, axis=1)
+    valid = norms > 1e-6
+    if int(valid.sum()) < 12:
+        return foreground
+    directions = vectors[valid] / norms[valid, None]
+    centers = _cluster_color_directions(directions)
+    if len(centers) <= 1:
+        return foreground
+    separation = max(
+        1.0 - float(np.dot(first, second))
+        for index, first in enumerate(centers)
+        for second in centers[index + 1 :]
+    )
+    if separation < 0.06:
+        return foreground
+
+    foreground_positions = np.argwhere(foreground)
+    valid_positions = foreground_positions[valid]
+    labels = np.argmax(directions @ centers.T, axis=1)
+    edge_x = max(1, round(width * 0.07))
+    edge_y = max(1, round(height * 0.07))
+    central_left, central_right = width * 0.14, width * 0.86
+    central_top, central_bottom = height * 0.14, height * 0.86
+    scores = []
+    for label in range(len(centers)):
+        positions = valid_positions[labels == label]
+        if not len(positions):
+            scores.append(float("-inf"))
+            continue
+        ys = positions[:, 0]
+        xs = positions[:, 1]
+        central_count = int(
+            (
+                (xs >= central_left)
+                & (xs <= central_right)
+                & (ys >= central_top)
+                & (ys <= central_bottom)
+            ).sum()
+        )
+        edge_count = int(
+            (
+                (xs < edge_x)
+                | (xs >= width - edge_x)
+                | (ys < edge_y)
+                | (ys >= height - edge_y)
+            ).sum()
+        )
+        active_columns = len(np.unique(xs))
+        active_rows = len(np.unique(ys))
+        line_like = (
+            (active_columns >= width * 0.78 and active_rows <= height * 0.20)
+            or (active_rows >= height * 0.78 and active_columns <= width * 0.20)
+        )
+        score = central_count * 2.0 + len(positions) * 0.32 - edge_count * 1.35
+        if line_like:
+            score -= len(positions) * 1.5
+        scores.append(score)
+    selected_label = int(np.argmax(scores))
+    selected_center = centers[selected_label]
+    compatible_labels = {
+        index
+        for index, center in enumerate(centers)
+        if float(np.dot(center, selected_center)) >= 0.94
+    }
+    selected = np.zeros((height, width), dtype=bool)
+    selected_positions = valid_positions[
+        np.isin(labels, list(compatible_labels))
+    ]
+    selected[selected_positions[:, 0], selected_positions[:, 1]] = True
+    if int(selected.sum()) < max(8, round(int(foreground.sum()) * 0.05)):
+        return foreground
+    return selected
+
+
+def _cluster_color_directions(directions: np.ndarray) -> np.ndarray:
+    if len(directions) > 6000:
+        step = max(1, len(directions) // 6000)
+        samples = directions[::step][:6000]
+    else:
+        samples = directions
+    center = samples.mean(axis=0)
+    norm = float(np.linalg.norm(center))
+    if norm <= 1e-6:
+        center = samples[0]
+    else:
+        center = center / norm
+    centers = [center]
+    target_count = min(3, max(1, len(samples) // 12))
+    while len(centers) < target_count:
+        similarities = samples @ np.asarray(centers).T
+        candidate = samples[int(np.argmin(np.max(similarities, axis=1)))]
+        if max(float(np.dot(candidate, existing)) for existing in centers) > 0.995:
+            break
+        centers.append(candidate)
+    centers_array = np.asarray(centers, dtype=np.float64)
+    for _ in range(10):
+        labels = np.argmax(samples @ centers_array.T, axis=1)
+        updated = []
+        for index, current in enumerate(centers_array):
+            members = samples[labels == index]
+            if not len(members):
+                updated.append(current)
+                continue
+            member_center = members.mean(axis=0)
+            member_norm = float(np.linalg.norm(member_center))
+            updated.append(member_center / member_norm if member_norm > 1e-6 else current)
+        next_centers = np.asarray(updated)
+        if np.max(np.abs(next_centers - centers_array)) < 1e-4:
+            centers_array = next_centers
+            break
+        centers_array = next_centers
+    return centers_array
+
+
 def _line_ink_mask(crop: Image.Image) -> np.ndarray:
-    gray = np.asarray(crop, dtype=np.int16)
-    background = int(np.percentile(gray, 88))
-    global_darkness = np.clip(background - gray, 0, 255)
-    radius = max(2.0, min(crop.size) * 0.12)
-    local_background = np.asarray(crop.filter(ImageFilter.GaussianBlur(radius)), dtype=np.int16)
-    local_darkness = np.clip(local_background - gray, 0, 255)
-    darkness = np.maximum(global_darkness, local_darkness).astype(np.uint8)
-    threshold = max(10, _otsu_threshold(darkness))
-    return darkness >= threshold
+    return _color_aware_ink_mask(crop)
 
 
 def _otsu_threshold(values: np.ndarray) -> int:
