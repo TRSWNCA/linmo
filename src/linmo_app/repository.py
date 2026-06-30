@@ -21,6 +21,10 @@ CREATE TABLE IF NOT EXISTS copybooks (
     cover_path TEXT NOT NULL DEFAULT '',
     tags TEXT NOT NULL DEFAULT '',
     notes TEXT NOT NULL DEFAULT '',
+    crop_left_ratio REAL NOT NULL DEFAULT 0,
+    crop_right_ratio REAL NOT NULL DEFAULT 0,
+    crop_top_ratio REAL NOT NULL DEFAULT 0,
+    crop_bottom_ratio REAL NOT NULL DEFAULT 0,
     created_at INTEGER NOT NULL,
     updated_at INTEGER NOT NULL
 );
@@ -32,6 +36,12 @@ CREATE TABLE IF NOT EXISTS pages (
     source_path TEXT NOT NULL,
     width INTEGER NOT NULL DEFAULT 0,
     height INTEGER NOT NULL DEFAULT 0,
+    crop_left_ratio REAL NOT NULL DEFAULT 0,
+    crop_right_ratio REAL NOT NULL DEFAULT 0,
+    crop_top_ratio REAL NOT NULL DEFAULT 0,
+    crop_bottom_ratio REAL NOT NULL DEFAULT 0,
+    rotation_degrees REAL NOT NULL DEFAULT 0,
+    crop_override INTEGER NOT NULL DEFAULT 0,
     thumb_path TEXT NOT NULL DEFAULT '',
     UNIQUE(copybook_id, page_no)
 );
@@ -41,6 +51,16 @@ CREATE TABLE IF NOT EXISTS queue_items (
     page_id INTEGER NOT NULL REFERENCES pages(id) ON DELETE CASCADE,
     params_json TEXT NOT NULL,
     created_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS page_analyses (
+    page_id INTEGER PRIMARY KEY REFERENCES pages(id) ON DELETE CASCADE,
+    source_fingerprint TEXT NOT NULL,
+    model_id TEXT NOT NULL,
+    status TEXT NOT NULL,
+    analysis_json TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS presets (
@@ -106,6 +126,16 @@ class Repository:
         with self.connect() as conn:
             conn.executescript(SCHEMA)
             _ensure_column(conn, "copybooks", "cover_path", "TEXT NOT NULL DEFAULT ''")
+            _ensure_column(conn, "copybooks", "crop_left_ratio", "REAL NOT NULL DEFAULT 0")
+            _ensure_column(conn, "copybooks", "crop_right_ratio", "REAL NOT NULL DEFAULT 0")
+            _ensure_column(conn, "copybooks", "crop_top_ratio", "REAL NOT NULL DEFAULT 0")
+            _ensure_column(conn, "copybooks", "crop_bottom_ratio", "REAL NOT NULL DEFAULT 0")
+            _ensure_column(conn, "pages", "crop_left_ratio", "REAL NOT NULL DEFAULT 0")
+            _ensure_column(conn, "pages", "crop_right_ratio", "REAL NOT NULL DEFAULT 0")
+            _ensure_column(conn, "pages", "crop_top_ratio", "REAL NOT NULL DEFAULT 0")
+            _ensure_column(conn, "pages", "crop_bottom_ratio", "REAL NOT NULL DEFAULT 0")
+            _ensure_column(conn, "pages", "rotation_degrees", "REAL NOT NULL DEFAULT 0")
+            _ensure_column(conn, "pages", "crop_override", "INTEGER NOT NULL DEFAULT 0")
             _ensure_column(conn, "generated_posts", "thumb_path", "TEXT NOT NULL DEFAULT ''")
             _ensure_column(conn, "generated_posts", "output_format", "TEXT NOT NULL DEFAULT 'pdf'")
             _ensure_column(conn, "generated_posts", "result_count", "INTEGER NOT NULL DEFAULT 0")
@@ -125,8 +155,9 @@ class Repository:
             cur = conn.execute(
                 """
                 INSERT INTO copybooks
-                    (title, author, style, source_type, source_path, cover_path, tags, notes, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    (title, author, style, source_type, source_path, cover_path, tags, notes,
+                     crop_left_ratio, crop_right_ratio, crop_top_ratio, crop_bottom_ratio, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     data["title"],
@@ -137,6 +168,10 @@ class Repository:
                     data.get("cover_path", ""),
                     data.get("tags", ""),
                     data.get("notes", ""),
+                    float(data.get("crop_left_ratio", 0) or 0),
+                    float(data.get("crop_right_ratio", 0) or 0),
+                    float(data.get("crop_top_ratio", 0) or 0),
+                    float(data.get("crop_bottom_ratio", 0) or 0),
                     now,
                     now,
                 ),
@@ -174,8 +209,15 @@ class Repository:
         return _row_to_dict(row)
 
     def update_copybook(self, copybook_id: int, metadata: dict[str, Any]) -> dict[str, Any]:
-        allowed = ["title", "author", "style", "cover_path", "tags", "notes"]
-        values = {key: str(metadata[key]) for key in allowed if key in metadata}
+        allowed = [
+            "title", "author", "style", "cover_path", "tags", "notes",
+            "crop_left_ratio", "crop_right_ratio", "crop_top_ratio", "crop_bottom_ratio",
+        ]
+        values = {
+            key: float(metadata[key]) if key in {"crop_left_ratio", "crop_right_ratio", "crop_top_ratio", "crop_bottom_ratio"} else str(metadata[key])
+            for key in allowed
+            if key in metadata
+        }
         if not values:
             return self.get_copybook(copybook_id)
         values["updated_at"] = _now()
@@ -191,8 +233,11 @@ class Repository:
         with self.connect() as conn:
             cur = conn.execute(
                 """
-                INSERT INTO pages (copybook_id, page_no, source_path, width, height, thumb_path)
-                VALUES (?, ?, ?, ?, ?, ?)
+                INSERT INTO pages
+                    (copybook_id, page_no, source_path, width, height,
+                     crop_left_ratio, crop_right_ratio, crop_top_ratio, crop_bottom_ratio,
+                     rotation_degrees, crop_override, thumb_path)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     data["copybook_id"],
@@ -200,6 +245,12 @@ class Repository:
                     data["source_path"],
                     data.get("width", 0),
                     data.get("height", 0),
+                    float(data.get("crop_left_ratio", 0) or 0),
+                    float(data.get("crop_right_ratio", 0) or 0),
+                    float(data.get("crop_top_ratio", 0) or 0),
+                    float(data.get("crop_bottom_ratio", 0) or 0),
+                    float(data.get("rotation_degrees", 0) or 0),
+                    int(data.get("crop_override", 0) or 0),
                     data.get("thumb_path", ""),
                 ),
             )
@@ -209,6 +260,54 @@ class Repository:
     def update_page_thumb(self, page_id: int, thumb_path: Path) -> None:
         with self.connect() as conn:
             conn.execute("UPDATE pages SET thumb_path = ? WHERE id = ?", (str(thumb_path), page_id))
+
+    def get_page_analysis(self, page_id: int) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM page_analyses WHERE page_id = ?", (page_id,)
+            ).fetchone()
+        if row is None:
+            return None
+        data = _row_to_dict(row)
+        data["analysis"] = json.loads(data.pop("analysis_json"))
+        return data
+
+    def save_page_analysis(
+        self,
+        page_id: int,
+        analysis: dict[str, Any],
+    ) -> dict[str, Any]:
+        now = _now()
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO page_analyses
+                    (page_id, source_fingerprint, model_id, status, analysis_json, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(page_id) DO UPDATE SET
+                    source_fingerprint = excluded.source_fingerprint,
+                    model_id = excluded.model_id,
+                    status = excluded.status,
+                    analysis_json = excluded.analysis_json,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    page_id,
+                    str(analysis.get("source_fingerprint", "")),
+                    str(analysis.get("model_id", "")),
+                    str(analysis.get("status", "ready")),
+                    json.dumps(analysis, ensure_ascii=False),
+                    now,
+                    now,
+                ),
+            )
+        saved = self.get_page_analysis(page_id)
+        assert saved is not None
+        return saved
+
+    def delete_page_analysis(self, page_id: int) -> None:
+        with self.connect() as conn:
+            conn.execute("DELETE FROM page_analyses WHERE page_id = ?", (page_id,))
 
     def list_pages(self, copybook_id: int) -> list[dict[str, Any]]:
         with self.connect() as conn:
@@ -225,12 +324,58 @@ class Repository:
             raise ValueError(f"page not found: {page_id}")
         return _row_to_dict(row)
 
+    def update_page(self, page_id: int, metadata: dict[str, Any]) -> dict[str, Any]:
+        allowed = [
+            "crop_left_ratio",
+            "crop_right_ratio",
+            "crop_top_ratio",
+            "crop_bottom_ratio",
+            "rotation_degrees",
+            "crop_override",
+            "thumb_path",
+        ]
+        values = {
+            key: (
+                float(metadata[key])
+                if key in {"crop_left_ratio", "crop_right_ratio", "crop_top_ratio", "crop_bottom_ratio", "rotation_degrees"}
+                else int(metadata[key])
+                if key == "crop_override"
+                else str(metadata[key])
+            )
+            for key in allowed
+            if key in metadata
+        }
+        if not values:
+            return self.get_page(page_id)
+        assignments = ", ".join(f"{key} = ?" for key in values)
+        with self.connect() as conn:
+            conn.execute(
+                f"UPDATE pages SET {assignments} WHERE id = ?",
+                [*values.values(), page_id],
+            )
+        return self.get_page(page_id)
+
     def get_page_with_copybook(self, page_id: int) -> dict[str, Any]:
         with self.connect() as conn:
             row = conn.execute(
                 """
-                SELECT p.*, c.source_type AS copybook_source_type, c.source_path AS copybook_source_path,
-                       c.title AS copybook_title
+                SELECT p.id, p.copybook_id, p.page_no, p.source_path, p.width, p.height, p.thumb_path,
+                       c.source_type AS copybook_source_type, c.source_path AS copybook_source_path,
+                       c.title AS copybook_title,
+                       c.crop_left_ratio AS copybook_crop_left_ratio,
+                       c.crop_right_ratio AS copybook_crop_right_ratio,
+                       c.crop_top_ratio AS copybook_crop_top_ratio,
+                       c.crop_bottom_ratio AS copybook_crop_bottom_ratio,
+                       p.crop_left_ratio AS page_crop_left_ratio,
+                       p.crop_right_ratio AS page_crop_right_ratio,
+                       p.crop_top_ratio AS page_crop_top_ratio,
+                       p.crop_bottom_ratio AS page_crop_bottom_ratio,
+                       p.rotation_degrees AS rotation_degrees,
+                       p.crop_override AS page_crop_override,
+                       CASE WHEN COALESCE(p.crop_override, 0) = 1 THEN p.crop_left_ratio ELSE c.crop_left_ratio END AS crop_left_ratio,
+                       CASE WHEN COALESCE(p.crop_override, 0) = 1 THEN p.crop_right_ratio ELSE c.crop_right_ratio END AS crop_right_ratio,
+                       CASE WHEN COALESCE(p.crop_override, 0) = 1 THEN p.crop_top_ratio ELSE c.crop_top_ratio END AS crop_top_ratio,
+                       CASE WHEN COALESCE(p.crop_override, 0) = 1 THEN p.crop_bottom_ratio ELSE c.crop_bottom_ratio END AS crop_bottom_ratio
                 FROM pages p
                 JOIN copybooks c ON c.id = p.copybook_id
                 WHERE p.id = ?

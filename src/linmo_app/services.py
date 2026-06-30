@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import base64
+import copy
 import hashlib
 import json
+import math
+import os
 import posixpath
 import shutil
 import time
@@ -16,26 +19,24 @@ from typing import Any
 import fitz
 from PIL import Image
 
-from linmo.processing import ProcessingParams, load_input_page, process_image
+from linmo.glyph_pipeline import (
+    ANALYSIS_VERSION,
+    analyze_page,
+    render_practice_pages,
+    source_fingerprint,
+    update_analysis,
+)
+from linmo.processing import ProcessingParams, load_input_page
+from linmo.runtime import add_runtime_log, log_exception, set_runtime_status
 
 from .paths import AppPaths
 from .repository import Repository
 
 IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tif", ".tiff"}
 GENERATED_FILE_SUFFIXES = {".pdf", ".png"}
-IPAD_DEVICE_PRESETS: dict[str, tuple[str, int, int]] = {
-    "ipad_mini_retina": ("iPad mini 5", 2048, 1536),
-    "ipad_mini_83": ("iPad mini 6/7", 2266, 1488),
-    "ipad_102": ("iPad 7/8/9", 2160, 1620),
-    "ipad_109_air": ("iPad 10/11, iPad Air 4/5/11-inch M-series", 2360, 1640),
-    "ipad_air_3": ("iPad Air 3", 2224, 1668),
-    "ipad_pro_11": ("iPad Pro 11-inch 2018-2022", 2388, 1668),
-    "ipad_pro_11_m4": ("iPad Pro 11-inch M4 and later", 2420, 1668),
-    "ipad_pro_129_air_13": ("iPad Pro 12.9-inch, iPad Air 13-inch M-series", 2732, 2048),
-    "ipad_pro_13_m4": ("iPad Pro 13-inch M4 and later", 2752, 2064),
-}
-DEFAULT_TARGET_DEVICE_PRESET = "ipad_109_air"
-QUEUE_PREVIEW_CACHE_VERSION = "gray-split-v2"
+QUEUE_PREVIEW_CACHE_VERSION = "glyph-grid-v1"
+MAX_COPYBOOK_CROP_RATIO = 0.45
+MAX_TOTAL_COPYBOOK_CROP_RATIO = 0.8
 
 
 class LinmoServices:
@@ -51,7 +52,6 @@ class LinmoServices:
             "webdav_username": "",
             "webdav_password": "",
             "webdav_remote_root": "Linmo",
-            "target_device_preset": DEFAULT_TARGET_DEVICE_PRESET,
         }
         current_settings = self.repo.get_settings()
         missing_defaults = {key: value for key, value in defaults.items() if key not in current_settings}
@@ -99,6 +99,18 @@ class LinmoServices:
         image.convert("RGB").save(preview_path, "JPEG", quality=88)
         return preview_path
 
+    def create_page_transform_preview(self, page_id: int) -> Path:
+        page = self.repo.get_page_with_copybook(page_id)
+        preview_path = self.paths.previews_dir / f"transform-{page_id}.jpg"
+        if preview_path.exists():
+            return preview_path
+
+        image = self.load_page_transformed_image(page, dpi=180)
+        image.thumbnail((1200, 1200))
+        preview_path.parent.mkdir(parents=True, exist_ok=True)
+        image.convert("RGB").save(preview_path, "JPEG", quality=88)
+        return preview_path
+
     def copybook_cover(self, copybook_id: int) -> Path | None:
         copybook = self.repo.get_copybook(copybook_id)
         cover_path = Path(copybook["cover_path"]) if copybook.get("cover_path") else None
@@ -111,29 +123,267 @@ class LinmoServices:
         return self.create_thumbnail(int(pages[0]["id"]))
 
     def update_copybook_metadata(self, copybook_id: int, metadata: dict[str, Any]) -> dict[str, Any]:
+        current = self.repo.get_copybook(copybook_id)
         data = dict(metadata)
         cover_source = data.pop("cover_source_path", "")
         if cover_source:
             data["cover_path"] = str(self._copy_cover_image(copybook_id, Path(str(cover_source)).expanduser()))
-        return self.repo.update_copybook(copybook_id, data)
+        if "crop_left_ratio" in data:
+            data["crop_left_ratio"] = _copybook_crop_ratio(data["crop_left_ratio"])
+        if "crop_right_ratio" in data:
+            data["crop_right_ratio"] = _copybook_crop_ratio(data["crop_right_ratio"])
+        if "crop_top_ratio" in data:
+            data["crop_top_ratio"] = _copybook_crop_ratio(data["crop_top_ratio"])
+        if "crop_bottom_ratio" in data:
+            data["crop_bottom_ratio"] = _copybook_crop_ratio(data["crop_bottom_ratio"])
+        left_ratio = float(data.get("crop_left_ratio", current.get("crop_left_ratio", 0)) or 0)
+        right_ratio = float(data.get("crop_right_ratio", current.get("crop_right_ratio", 0)) or 0)
+        top_ratio = float(data.get("crop_top_ratio", current.get("crop_top_ratio", 0)) or 0)
+        bottom_ratio = float(data.get("crop_bottom_ratio", current.get("crop_bottom_ratio", 0)) or 0)
+        self._validate_crop_ratios(left_ratio, right_ratio, top_ratio, bottom_ratio)
+
+        updated = self.repo.update_copybook(copybook_id, data)
+        if (
+            float(current.get("crop_left_ratio") or 0) != float(updated.get("crop_left_ratio") or 0)
+            or float(current.get("crop_right_ratio") or 0) != float(updated.get("crop_right_ratio") or 0)
+            or float(current.get("crop_top_ratio") or 0) != float(updated.get("crop_top_ratio") or 0)
+            or float(current.get("crop_bottom_ratio") or 0) != float(updated.get("crop_bottom_ratio") or 0)
+        ):
+            self._invalidate_copybook_page_caches(copybook_id)
+        return updated
+
+    def get_page_detail(self, page_id: int) -> dict[str, Any]:
+        return self.repo.get_page_with_copybook(page_id)
+
+    def update_page_crop(self, page_id: int, metadata: dict[str, Any]) -> dict[str, Any]:
+        current = self.repo.get_page_with_copybook(page_id)
+        left_ratio = _copybook_crop_ratio(metadata.get("crop_left_ratio", current.get("crop_left_ratio", 0)))
+        right_ratio = _copybook_crop_ratio(metadata.get("crop_right_ratio", current.get("crop_right_ratio", 0)))
+        top_ratio = _copybook_crop_ratio(metadata.get("crop_top_ratio", current.get("crop_top_ratio", 0)))
+        bottom_ratio = _copybook_crop_ratio(metadata.get("crop_bottom_ratio", current.get("crop_bottom_ratio", 0)))
+        rotation_degrees = _page_rotation_degrees(
+            metadata.get("rotation_degrees", current.get("rotation_degrees", 0))
+        )
+        self._validate_crop_ratios(left_ratio, right_ratio, top_ratio, bottom_ratio)
+
+        updated = self.repo.update_page(
+            page_id,
+            {
+                "crop_left_ratio": left_ratio,
+                "crop_right_ratio": right_ratio,
+                "crop_top_ratio": top_ratio,
+                "crop_bottom_ratio": bottom_ratio,
+                "rotation_degrees": rotation_degrees,
+                "crop_override": 1,
+            },
+        )
+        if (
+            float(current.get("crop_left_ratio") or 0) != left_ratio
+            or float(current.get("crop_right_ratio") or 0) != right_ratio
+            or float(current.get("crop_top_ratio") or 0) != top_ratio
+            or float(current.get("crop_bottom_ratio") or 0) != bottom_ratio
+            or float(current.get("rotation_degrees") or 0) != rotation_degrees
+            or int(current.get("page_crop_override") or 0) != 1
+        ):
+            self._invalidate_page_caches(page_id)
+        return self.repo.get_page_with_copybook(page_id)
 
     def load_page_image(self, page: dict[str, Any], dpi: int) -> Image.Image:
+        image = self.load_page_transformed_image(page, dpi)
+        return self._apply_page_crop(image, page)
+
+    def load_page_transformed_image(self, page: dict[str, Any], dpi: int) -> Image.Image:
         if page["copybook_source_type"] == "pdf":
-            return load_input_page(Path(page["copybook_source_path"]), int(page["page_no"]), dpi)
-        return load_input_page(Path(page["source_path"]), 1, dpi)
+            image = load_input_page(Path(page["copybook_source_path"]), int(page["page_no"]), dpi)
+        else:
+            image = load_input_page(Path(page["source_path"]), 1, dpi)
+        return self._apply_page_rotation(image, float(page.get("rotation_degrees", 0) or 0))
+
+    def analyze_page(self, page_id: int, force: bool = False, dpi: int | None = None) -> dict[str, Any]:
+        set_runtime_status("ocr", "loading_page", "正在读取页面", page_id=page_id)
+        try:
+            page = self.repo.get_page_with_copybook(page_id)
+            resolved_dpi = int(dpi or self.default_params_for_page(page_id)["dpi"])
+            source = self.load_page_image(page, dpi=resolved_dpi)
+            fingerprint = source_fingerprint(source)
+            cached = self.repo.get_page_analysis(page_id)
+            if (
+                not force
+                and cached is not None
+                and cached["source_fingerprint"] == fingerprint
+                and int(cached["analysis"].get("version", 0)) == ANALYSIS_VERSION
+            ):
+                add_runtime_log("info", "backend.ocr", f"页面 {page_id} 使用识别缓存")
+                set_runtime_status("ocr", "cache_hit", "正在读取识别缓存", page_id=page_id)
+                return cached["analysis"]
+            if os.environ.get("LINMO_DISABLE_OCR") != "1":
+                os.environ.setdefault("PADDLE_PDX_CACHE_HOME", str(self.paths.models_dir))
+
+            def report_progress(stage: str, message: str) -> None:
+                set_runtime_status("ocr", stage, message, page_id=page_id)
+
+            analysis = analyze_page(source, progress=report_progress)
+            analysis["dpi"] = resolved_dpi
+            saved = self.repo.save_page_analysis(page_id, analysis)["analysis"]
+            if analysis.get("warning"):
+                add_runtime_log("warning", "backend.ocr", str(analysis["warning"]), echo=False)
+                set_runtime_status("ocr", "warning", str(analysis["warning"]), page_id=page_id)
+            else:
+                set_runtime_status("ocr", "complete", "识别完成", page_id=page_id)
+            return saved
+        except Exception as exc:
+            set_runtime_status("ocr", "error", f"识别失败：{exc}", page_id=page_id)
+            log_exception("backend.services", f"页面 {page_id} 识别失败", exc)
+            raise
+
+    def update_page_analysis(
+        self,
+        page_id: int,
+        groups: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        analysis = self.analyze_page(page_id)
+        updated = update_analysis(analysis, groups=groups)
+        if any(str(group.get("id", "")).startswith("selected-stream") for group in groups):
+            updated["selection_mode"] = "ordered_stream"
+            updated["ocr_groups"] = analysis.get("ocr_groups") or analysis.get("groups", [])
+        elif analysis.get("ocr_groups") is not None:
+            updated["ocr_groups"] = analysis.get("ocr_groups")
+        return self.repo.save_page_analysis(page_id, updated)["analysis"]
+
+    def update_page_ocr_groups(
+        self,
+        page_id: int,
+        groups: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        analysis = self.analyze_page(page_id)
+        source_groups = copy.deepcopy(groups)
+        if analysis.get("selection_mode") == "ordered_stream":
+            updated = copy.deepcopy(analysis)
+            updated["ocr_groups"] = source_groups
+            source_glyphs = {
+                str(glyph.get("id")): glyph
+                for group in source_groups
+                for glyph in group.get("glyphs", [])
+            }
+            for group in updated.get("groups", []):
+                for glyph in group.get("glyphs", []):
+                    source = source_glyphs.get(str(glyph.get("id")))
+                    if source is None:
+                        continue
+                    glyph["text"] = source.get("text", glyph.get("text", ""))
+                    glyph["bbox"] = copy.deepcopy(source.get("bbox", glyph.get("bbox")))
+                    glyph["polygon"] = copy.deepcopy(source.get("polygon", glyph.get("polygon")))
+                    glyph["kind"] = source.get("kind", glyph.get("kind", "character"))
+            updated["status"] = "reviewed"
+        else:
+            updated = update_analysis(analysis, groups=source_groups)
+            updated["selection_mode"] = "ocr_groups"
+        return self.repo.save_page_analysis(page_id, updated)["analysis"]
+
+    def render_page_previews(
+        self,
+        page_id: int,
+        params_dict: dict[str, Any],
+    ) -> list[Path]:
+        params = self._params_from_dict(params_dict)
+        page = self.repo.get_page_with_copybook(page_id)
+        source = self.load_page_image(page, dpi=params.dpi)
+        analysis = self.analyze_page(page_id, dpi=params.dpi)
+        outputs = render_practice_pages(source, analysis, params.grid)
+        cache_key = _page_preview_cache_key(page_id, params_dict, analysis)
+        paths = []
+        for index, output in enumerate(outputs, start=1):
+            output.thumbnail((1200, 1200))
+            out_path = self.paths.previews_dir / f"page-{page_id}-{cache_key}-{index}.jpg"
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+            output.convert("RGB").save(out_path, "JPEG", quality=88)
+            paths.append(out_path)
+        return paths
+
+    def render_page_preview(self, page_id: int, params_dict: dict[str, Any]) -> Path:
+        return self.render_page_previews(page_id, params_dict)[0]
+
+    def export_page_to_generated_post(
+        self,
+        page_id: int,
+        params_dict: dict[str, Any],
+        name: str,
+        output_format: str = "pdf",
+    ) -> dict[str, Any]:
+        clean_name = name.strip()
+        clean_format = output_format.strip().lower()
+        if not clean_name:
+            raise ValueError("generated post name cannot be empty")
+        if clean_format not in {"pdf", "png"}:
+            raise ValueError("output_format must be pdf or png")
+
+        post = self.repo.create_generated_post(clean_name, 0)
+        post_dir = self._generated_post_dir(int(post["id"]))
+        post_dir.mkdir(parents=True, exist_ok=True)
+        results_dir = post_dir / "results"
+        results_dir.mkdir(parents=True, exist_ok=True)
+        images = self._render_page_images(page_id, params_dict)
+
+        if clean_format == "pdf":
+            original_path = post_dir / "original.pdf"
+            first, rest = [image.convert("RGB") for image in images][0], [image.convert("RGB") for image in images][1:]
+            first.save(original_path, "PDF", resolution=float(self._params_from_dict({}).dpi), save_all=bool(rest), append_images=rest)
+            self.repo.record_export(original_path, len(images))
+            with fitz.open(original_path) as document:
+                generated_page_count = document.page_count
+        else:
+            original_dir = post_dir / "original"
+            original_dir.mkdir(parents=True, exist_ok=True)
+            saved_paths = self._save_png_pages(images, original_dir)
+            original_path = saved_paths[0]
+            self.repo.record_export(original_path, len(saved_paths))
+            generated_page_count = len(saved_paths)
+
+        thumb = self._create_generated_post_thumbnail(int(post["id"]), original_path)
+        return self.repo.update_generated_post(
+            int(post["id"]),
+            {
+                "original_pdf_path": str(original_path),
+                "output_format": clean_format,
+                "thumb_path": str(thumb),
+                "page_count": generated_page_count,
+                "result_count": self._count_generated_results(results_dir),
+                "sync_status": "local",
+            },
+        )
+
+    def analyze_queue_item(self, item_id: int, force: bool = False) -> dict[str, Any]:
+        item = self.repo.get_queue_item(item_id)
+        params = self._params_from_dict(item["params"])
+        return self.analyze_page(int(item["page_id"]), force=force, dpi=params.dpi)
+
+    def update_queue_analysis(
+        self,
+        item_id: int,
+        groups: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        item = self.repo.get_queue_item(item_id)
+        return self.update_page_analysis(int(item["page_id"]), groups)
+
+    def render_queue_previews(self, item_id: int) -> list[Path]:
+        item = self.repo.get_queue_item(item_id)
+        page_id = int(item["page_id"])
+        params_dict = dict(item["params"])
+        page = self.repo.get_page_with_copybook(page_id)
+        params = self._params_from_dict(params_dict)
+        outputs = self._render_page_images(page_id, params_dict)
+        cache_key = _queue_preview_cache_key(item, page)
+        paths = []
+        for index, output in enumerate(outputs, start=1):
+            output.thumbnail((1200, 1200))
+            out_path = self.paths.previews_dir / f"queue-{item_id}-{cache_key}-{index}.jpg"
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+            output.convert("RGB").save(out_path, "JPEG", quality=88)
+            paths.append(out_path)
+        return paths
 
     def render_queue_preview(self, item_id: int) -> Path:
-        item = self.repo.get_queue_item(item_id)
-        page = self.repo.get_page_with_copybook(int(item["page_id"]))
-        params = self._params_from_dict(item["params"])
-        source = self.load_page_image(page, dpi=params.dpi)
-        output = process_image(source, params)
-        output.thumbnail((1200, 1200))
-        cache_key = _queue_preview_cache_key(item, page)
-        out_path = self.paths.previews_dir / f"queue-{item_id}-{cache_key}.jpg"
-        out_path.parent.mkdir(parents=True, exist_ok=True)
-        output.convert("RGB").save(out_path, "JPEG", quality=88)
-        return out_path
+        return self.render_queue_previews(item_id)[0]
 
     def export_queue_to_pdf(
         self,
@@ -173,7 +423,7 @@ class LinmoServices:
         if clean_format not in {"pdf", "png"}:
             raise ValueError("output_format must be pdf or png")
 
-        post = self.repo.create_generated_post(clean_name, len(queue_item_ids))
+        post = self.repo.create_generated_post(clean_name, 0)
         post_dir = self._generated_post_dir(int(post["id"]))
         post_dir.mkdir(parents=True, exist_ok=True)
         results_dir = post_dir / "results"
@@ -182,13 +432,16 @@ class LinmoServices:
         if clean_format == "pdf":
             original_path = post_dir / "original.pdf"
             self.export_queue_to_pdf(queue_item_ids, preset_id, str(original_path))
+            with fitz.open(original_path) as document:
+                generated_page_count = document.page_count
         else:
             original_dir = post_dir / "original"
             original_dir.mkdir(parents=True, exist_ok=True)
-            images = self._render_queue_images(queue_item_ids, preset_id, apply_png_target=True)
+            images = self._render_queue_images(queue_item_ids, preset_id)
             saved_paths = self._save_png_pages(images, original_dir)
             original_path = saved_paths[0]
             self.repo.record_export(original_path, len(saved_paths))
+            generated_page_count = len(saved_paths)
 
         thumb = self._create_generated_post_thumbnail(int(post["id"]), original_path)
         return self.repo.update_generated_post(
@@ -197,6 +450,7 @@ class LinmoServices:
                 "original_pdf_path": str(original_path),
                 "output_format": clean_format,
                 "thumb_path": str(thumb),
+                "page_count": generated_page_count,
                 "result_count": self._count_generated_results(results_dir),
                 "sync_status": "local",
             },
@@ -375,6 +629,80 @@ class LinmoServices:
             return source_path.parent
         return source_path.parent if source_path.name != "pages" else source_path.parent
 
+    def _apply_page_crop(self, image: Image.Image, page: dict[str, Any]) -> Image.Image:
+        left_ratio = _copybook_crop_ratio(page.get("crop_left_ratio", 0))
+        right_ratio = _copybook_crop_ratio(page.get("crop_right_ratio", 0))
+        top_ratio = _copybook_crop_ratio(page.get("crop_top_ratio", 0))
+        bottom_ratio = _copybook_crop_ratio(page.get("crop_bottom_ratio", 0))
+        if left_ratio <= 0 and right_ratio <= 0 and top_ratio <= 0 and bottom_ratio <= 0:
+            return image
+
+        left = int(round(image.width * left_ratio))
+        right = image.width - int(round(image.width * right_ratio))
+        top = int(round(image.height * top_ratio))
+        bottom = image.height - int(round(image.height * bottom_ratio))
+        min_width = max(16, int(round(image.width * 0.1)))
+        min_height = max(16, int(round(image.height * 0.1)))
+        if right - left < min_width or bottom - top < min_height:
+            image.close()
+            raise ValueError("copybook crop margins leave too little page content")
+        cropped = image.crop((left, top, right, bottom))
+        image.close()
+        return cropped
+
+    def _apply_page_rotation(self, image: Image.Image, rotation_degrees: float) -> Image.Image:
+        angle = _page_rotation_degrees(rotation_degrees)
+        if abs(angle) < 0.001:
+            return image
+        normalized = angle % 360
+        if abs(normalized - 90) < 0.001:
+            rotated = image.transpose(Image.Transpose.ROTATE_90)
+        elif abs(normalized - 180) < 0.001:
+            rotated = image.transpose(Image.Transpose.ROTATE_180)
+        elif abs(normalized - 270) < 0.001:
+            rotated = image.transpose(Image.Transpose.ROTATE_270)
+        else:
+            rgb = image.convert("RGB")
+            corners = [
+                rgb.getpixel((0, 0)),
+                rgb.getpixel((max(0, rgb.width - 1), 0)),
+                rgb.getpixel((0, max(0, rgb.height - 1))),
+                rgb.getpixel((max(0, rgb.width - 1), max(0, rgb.height - 1))),
+            ]
+            fill = tuple(sorted(color[channel] for color in corners)[len(corners) // 2] for channel in range(3))
+            rotated = rgb.rotate(
+                angle,
+                resample=Image.Resampling.BICUBIC,
+                expand=True,
+                fillcolor=fill,
+            )
+            if rgb is not image:
+                rgb.close()
+        image.close()
+        return rotated
+
+    def _validate_crop_ratios(self, left_ratio: float, right_ratio: float, top_ratio: float, bottom_ratio: float) -> None:
+        if left_ratio + right_ratio >= MAX_TOTAL_COPYBOOK_CROP_RATIO:
+            raise ValueError("left and right crop margins are too large")
+        if top_ratio + bottom_ratio >= MAX_TOTAL_COPYBOOK_CROP_RATIO:
+            raise ValueError("top and bottom crop margins are too large")
+
+    def _invalidate_copybook_page_caches(self, copybook_id: int) -> None:
+        for page in self.repo.list_pages(copybook_id):
+            page_id = int(page["id"])
+            self._invalidate_page_caches(page_id)
+
+    def _invalidate_page_caches(self, page_id: int) -> None:
+        for path in (
+            self.paths.thumbs_dir / f"{page_id}.jpg",
+            self.paths.previews_dir / f"source-{page_id}.jpg",
+            self.paths.previews_dir / f"transform-{page_id}.jpg",
+        ):
+            if path.exists():
+                path.unlink()
+        for path in self.paths.previews_dir.glob(f"page-{page_id}-*.jpg"):
+            path.unlink()
+
     def _new_copybook_dir(self) -> Path:
         stamp = f"{int(time.time() * 1000)}"
         path = self.paths.library_dir / stamp
@@ -388,7 +716,6 @@ class LinmoServices:
         self,
         queue_item_ids: list[int],
         preset_id: int | None = None,
-        apply_png_target: bool = False,
     ) -> list[Image.Image]:
         if not queue_item_ids:
             raise ValueError("queue_item_ids cannot be empty")
@@ -396,27 +723,22 @@ class LinmoServices:
         images = []
         for item_id in queue_item_ids:
             item = self.repo.get_queue_item(int(item_id))
-            page = self.repo.get_page_with_copybook(int(item["page_id"]))
             params_dict = dict(item["params"])
             if preset:
                 params_dict = self._apply_preset(params_dict, preset)
-            params = self._params_from_dict(params_dict)
-            image = process_image(self.load_page_image(page, dpi=params.dpi), params)
-            if apply_png_target:
-                image = self._scale_png_for_target(image, params.mode)
-            images.append(image)
+            images.extend(self._render_page_images(int(item["page_id"]), params_dict))
         return images
 
-    def _scale_png_for_target(self, image: Image.Image, mode: str) -> Image.Image:
-        settings = self.repo.get_settings()
-        preset_key = settings.get("target_device_preset", DEFAULT_TARGET_DEVICE_PRESET)
-        preset = IPAD_DEVICE_PRESETS.get(preset_key) or IPAD_DEVICE_PRESETS[DEFAULT_TARGET_DEVICE_PRESET]
-        long_side = max(preset[1], preset[2])
-        max_height = long_side if mode == "col" else long_side * 2
-        if image.height <= max_height:
-            return image
-        width = max(1, round(image.width * max_height / image.height))
-        return image.resize((width, max_height), Image.Resampling.LANCZOS)
+    def _render_page_images(
+        self,
+        page_id: int,
+        params_dict: dict[str, Any],
+    ) -> list[Image.Image]:
+        params = self._params_from_dict(params_dict)
+        page = self.repo.get_page_with_copybook(page_id)
+        source = self.load_page_image(page, dpi=params.dpi)
+        analysis = self.analyze_page(page_id, dpi=params.dpi)
+        return render_practice_pages(source, analysis, params.grid)
 
     def _save_png_pages(self, images: list[Image.Image], output_dir: Path) -> list[Path]:
         saved_paths = []
@@ -469,56 +791,22 @@ class LinmoServices:
 
     def _params_from_dict(self, data: dict[str, Any]) -> ProcessingParams:
         return ProcessingParams(
-            mode=data.get("mode", "row"),
-            column_detection=data.get("column_detection", "gray"),
-            columns=_optional_int(data.get("columns")),
-            rows=_optional_int(data.get("rows")),
-            blank_ratio=float(data.get("blank_ratio", 1.0)),
+            grid_style=str(data.get("grid_style", "tian")),
+            cell_size_mm=float(data.get("cell_size_mm", 15.0)),
+            margin_mm=float(data.get("margin_mm", 15.0)),
             dpi=int(data.get("dpi", 300)),
-            gray_min=int(data.get("gray_min", 70)),
-            gray_max=int(data.get("gray_max", 210)),
-            ink_max=int(data.get("ink_max", 170)),
-            line_max=int(data.get("line_max", 225)),
-            background_image=_optional_path(data.get("background_image")),
-            extract_foreground=bool(data.get("extract_foreground", False)),
-            ink_color=data.get("ink_color", "#000000"),
-            foreground_threshold=int(data.get("foreground_threshold", 18)),
-            foreground_method=data.get("foreground_method", "adaptive"),
         )
 
     def default_params_for_page(self, page_id: int) -> dict[str, Any]:
-        page = self.repo.get_page_with_copybook(page_id)
-        if page["copybook_source_type"] == "images":
-            return {
-                "mode": "col",
-                "column_detection": "ink",
-                "blank_ratio": 1.0,
-                "ink_color": "#000000",
-                "foreground_threshold": 35,
-                "foreground_method": "adaptive",
-            }
-        title = str(page.get("copybook_title", ""))
-        if "红楼梦" in title:
-            return {
-                "mode": "col",
-                "column_detection": "gray",
-                "blank_ratio": 1.0,
-                "ink_color": "#000000",
-                "foreground_method": "adaptive",
-            }
         return {
-            "mode": "row",
-            "column_detection": "gray",
-            "blank_ratio": 1.0,
-            "ink_color": "#000000",
-            "foreground_method": "adaptive",
+            "grid_style": "tian",
+            "cell_size_mm": 15.0,
+            "margin_mm": 15.0,
+            "dpi": int(self.repo.get_settings().get("default_dpi", "300")),
         }
 
     def _apply_preset(self, params: dict[str, Any], preset: dict[str, Any]) -> dict[str, Any]:
         merged = dict(params)
-        for key in ["background_image", "ink_color", "foreground_threshold", "mode", "column_detection"]:
-            if preset.get(key) not in (None, ""):
-                merged[key] = preset[key]
         merged.update(preset.get("params", {}))
         return merged
 
@@ -542,16 +830,15 @@ def _queue_preview_cache_key(item: dict[str, Any], page: dict[str, Any]) -> str:
     return hashlib.sha1(encoded).hexdigest()[:12]
 
 
-def _optional_int(value: Any) -> int | None:
-    if value in (None, ""):
-        return None
-    return int(value)
-
-
-def _optional_path(value: Any) -> Path | None:
-    if value in (None, ""):
-        return None
-    return Path(str(value)).expanduser()
+def _page_preview_cache_key(page_id: int, params: dict[str, Any], analysis: dict[str, Any]) -> str:
+    payload = {
+        "version": "page-glyph-v1",
+        "page_id": int(page_id),
+        "params": params,
+        "analysis": analysis,
+    }
+    encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha1(encoded).hexdigest()[:12]
 
 
 def _chinese_number(value: int) -> str:
@@ -574,6 +861,31 @@ def _chinese_number(value: int) -> str:
 
 def _safe_remote_name(value: str) -> str:
     return value.replace("/", "／").replace("\\", "＼").strip() or "未命名"
+
+
+def _page_rotation_degrees(value: Any) -> float:
+    try:
+        angle = float(value or 0)
+    except (TypeError, ValueError):
+        angle = 0.0
+    if not math.isfinite(angle):
+        angle = 0.0
+    normalized = (angle + 180.0) % 360.0 - 180.0
+    if abs(normalized) < 0.001:
+        return 0.0
+    return round(normalized, 3)
+
+
+def _copybook_crop_ratio(value: Any) -> float:
+    try:
+        ratio = float(value or 0)
+    except (TypeError, ValueError):
+        ratio = 0.0
+    if ratio < 0:
+        return 0.0
+    if ratio > MAX_COPYBOOK_CROP_RATIO:
+        return MAX_COPYBOOK_CROP_RATIO
+    return ratio
 
 
 class _WebDavClient:

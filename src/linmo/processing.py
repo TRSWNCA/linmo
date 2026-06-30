@@ -5,6 +5,7 @@ from pathlib import Path
 
 from PIL import Image
 
+from .glyph_pipeline import GridParams, analyze_page, render_practice_pages
 from .image_pipeline import (
     compose_column_practice_page,
     compose_row_practice_page,
@@ -19,6 +20,9 @@ from .image_pipeline import (
 
 @dataclass(frozen=True)
 class ProcessingParams:
+    grid_style: str = "tian"
+    cell_size_mm: float = 15.0
+    margin_mm: float = 15.0
     mode: str = "row"
     column_detection: str = "gray"
     columns: int | None = None
@@ -34,6 +38,15 @@ class ProcessingParams:
     ink_color: str = "#000000"
     foreground_threshold: int = 18
     foreground_method: str = "adaptive"
+
+    @property
+    def grid(self) -> GridParams:
+        return GridParams(
+            grid_style=self.grid_style,
+            cell_size_mm=self.cell_size_mm,
+            margin_mm=self.margin_mm,
+            dpi=self.dpi,
+        )
 
 
 def load_input_page(input_path: Path, page_number: int, dpi: int) -> Image.Image:
@@ -98,6 +111,25 @@ def process_image(image: Image.Image, params: ProcessingParams) -> Image.Image:
 
 def process_input_page(input_path: Path, page_number: int, params: ProcessingParams) -> Image.Image:
     return process_image(load_input_page(input_path, page_number, params.dpi), params)
+
+
+def process_glyph_pages(
+    image: Image.Image,
+    params: ProcessingParams,
+    analysis: dict | None = None,
+) -> tuple[dict, list[Image.Image]]:
+    page_analysis = analysis or analyze_page(image)
+    return page_analysis, render_practice_pages(image, page_analysis, params.grid)
+
+
+def process_input_glyph_pages(
+    input_path: Path,
+    page_number: int,
+    params: ProcessingParams,
+    analysis: dict | None = None,
+) -> tuple[dict, list[Image.Image]]:
+    image = load_input_page(input_path, page_number, params.dpi)
+    return process_glyph_pages(image, params, analysis)
 
 
 def export_processed_pages(

@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import copy
+import os
+import sqlite3
 import tempfile
 import unittest
 import urllib.error
@@ -10,10 +13,28 @@ from PIL import Image, ImageDraw
 
 from linmo_app.api import LinmoApi
 from linmo_app.paths import AppPaths
+from linmo_app.repository import Repository
 from linmo_app.services import LinmoServices, _WebDavClient
+
+os.environ["LINMO_DISABLE_OCR"] = "1"
 
 
 class AppServicesTests(unittest.TestCase):
+    def test_existing_pages_table_migrates_rotation_column(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            database = Path(tmp) / "legacy.sqlite3"
+            with sqlite3.connect(database) as connection:
+                connection.execute("CREATE TABLE pages (id INTEGER PRIMARY KEY)")
+
+            Repository(database)
+
+            with sqlite3.connect(database) as connection:
+                columns = {
+                    row[1]: row[2]
+                    for row in connection.execute("PRAGMA table_info(pages)").fetchall()
+                }
+            self.assertEqual(columns["rotation_degrees"], "REAL")
+
     def test_repository_import_thumbnail_queue_preview_and_export(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -34,17 +55,17 @@ class AppServicesTests(unittest.TestCase):
             self.assertEqual(thumb, services.create_thumbnail(pages[0]["id"]))
 
             params = {
-                "mode": "row",
-                "blank_ratio": 0.5,
-                "ink_color": "#000000",
-                "foreground_threshold": 18,
+                "grid_style": "tian",
+                "cell_size_mm": 15,
+                "margin_mm": 15,
+                "dpi": 72,
             }
             queue_item = services.repo.add_queue_item(pages[0]["id"], params)
             preview = services.render_queue_preview(queue_item["id"])
             self.assertTrue(preview.exists())
             self.assertIn(f"queue-{queue_item['id']}-", preview.name)
 
-            updated = services.repo.update_queue_item(queue_item["id"], {"blank_ratio": 0.75})
+            updated = services.repo.update_queue_item(queue_item["id"], {"grid_style": "mi"})
             updated_preview = services.render_queue_preview(updated["id"])
             self.assertTrue(updated_preview.exists())
             self.assertNotEqual(preview, updated_preview)
@@ -64,7 +85,7 @@ class AppServicesTests(unittest.TestCase):
             page = services.repo.list_pages(imported[0]["id"])[0]
             queue_item = services.repo.add_queue_item(
                 page["id"],
-                {"mode": "row", "blank_ratio": 0.5, "ink_color": "#000000"},
+                {"grid_style": "tian", "cell_size_mm": 15, "dpi": 72},
             )
 
             self.assertEqual(services.next_generated_post_name(), "卷一")
@@ -95,7 +116,7 @@ class AppServicesTests(unittest.TestCase):
             imported = services.import_copybooks([str(image_dir)])
             pages = services.repo.list_pages(imported[0]["id"])
             queue_items = [
-                services.repo.add_queue_item(page["id"], {"mode": "row", "blank_ratio": 0.5, "ink_color": "#000000"})
+                services.repo.add_queue_item(page["id"], {"grid_style": "tian", "cell_size_mm": 15, "dpi": 72})
                 for page in pages
             ]
 
@@ -110,17 +131,202 @@ class AppServicesTests(unittest.TestCase):
             self.assertTrue(Path(post["thumb_path"]).exists())
             self.assertEqual(services.repo.stats()["exported_pages"], 2)
 
-    def test_png_target_device_limits_height_by_split_direction(self) -> None:
+    def test_page_analysis_is_cached_and_can_be_reviewed(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            services = LinmoServices(AppPaths(Path(tmp) / "data"))
-            services.repo.update_settings({"target_device_preset": "ipad_mini_retina"})
-            tall = Image.new("RGB", (1000, 5000), (255, 255, 255))
+            root = Path(tmp)
+            source = root / "sample.png"
+            _make_ruled_image(source)
+            services = LinmoServices(AppPaths(root / "data"))
+            imported = services.import_copybooks([str(source)])
+            page = services.repo.list_pages(imported[0]["id"])[0]
+            item = services.repo.add_queue_item(
+                page["id"], {"grid_style": "tian", "cell_size_mm": 15, "dpi": 72}
+            )
 
-            vertical = services._scale_png_for_target(tall, "col")
-            horizontal = services._scale_png_for_target(tall, "row")
+            first = services.analyze_queue_item(item["id"])
+            second = services.analyze_queue_item(item["id"])
+            self.assertEqual(first, second)
+            self.assertTrue(first["groups"])
 
-            self.assertEqual(vertical.height, 2048)
-            self.assertEqual(horizontal.height, 4096)
+            groups = first["groups"]
+            groups[0]["glyphs"][0]["text"] = "改"
+            reviewed = services.update_queue_analysis(item["id"], groups)
+            self.assertEqual(reviewed["status"], "reviewed")
+            self.assertEqual(
+                services.analyze_queue_item(item["id"])["groups"][0]["glyphs"][0]["text"],
+                "改",
+            )
+
+    def test_copybook_crop_margins_are_applied_before_page_loading(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "margin.png"
+            _make_margin_image(source)
+            services = LinmoServices(AppPaths(root / "data"))
+
+            imported = services.import_copybooks([str(source)])
+            page = services.repo.list_pages(imported[0]["id"])[0]
+            uncropped = services.load_page_image(services.repo.get_page_with_copybook(page["id"]), dpi=72)
+            self.assertEqual(uncropped.size, (120, 100))
+
+            updated = services.update_copybook_metadata(
+                imported[0]["id"],
+                {
+                    "crop_left_ratio": 0.1,
+                    "crop_right_ratio": 0.1,
+                    "crop_top_ratio": 0.2,
+                    "crop_bottom_ratio": 0.3,
+                },
+            )
+            self.assertAlmostEqual(updated["crop_left_ratio"], 0.1)
+            self.assertAlmostEqual(updated["crop_right_ratio"], 0.1)
+            self.assertAlmostEqual(updated["crop_top_ratio"], 0.2)
+            self.assertAlmostEqual(updated["crop_bottom_ratio"], 0.3)
+
+            cropped = services.load_page_image(services.repo.get_page_with_copybook(page["id"]), dpi=72)
+            self.assertEqual(cropped.size, (96, 50))
+            self.assertEqual(cropped.getpixel((0, 0)), (255, 255, 255))
+            self.assertEqual(cropped.getpixel((95, 49)), (255, 255, 255))
+
+    def test_page_crop_overrides_copybook_default_and_single_page_flow_works(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "page.png"
+            _make_margin_image(source)
+            services = LinmoServices(AppPaths(root / "data"))
+
+            imported = services.import_copybooks([str(source)])
+            updated_copybook = services.update_copybook_metadata(
+                imported[0]["id"],
+                {
+                    "crop_left_ratio": 0.05,
+                    "crop_right_ratio": 0.05,
+                    "crop_top_ratio": 0.1,
+                    "crop_bottom_ratio": 0.1,
+                },
+            )
+            self.assertAlmostEqual(updated_copybook["crop_left_ratio"], 0.05)
+            self.assertAlmostEqual(updated_copybook["crop_right_ratio"], 0.05)
+            self.assertAlmostEqual(updated_copybook["crop_top_ratio"], 0.1)
+
+            page = services.repo.list_pages(imported[0]["id"])[0]
+            detail = services.get_page_detail(page["id"])
+            self.assertAlmostEqual(detail["crop_left_ratio"], 0.05)
+            self.assertAlmostEqual(detail["crop_right_ratio"], 0.05)
+            self.assertAlmostEqual(detail["crop_top_ratio"], 0.1)
+            self.assertAlmostEqual(detail["crop_bottom_ratio"], 0.1)
+            self.assertEqual(int(detail["page_crop_override"]), 0)
+
+            page_detail = services.update_page_crop(
+                page["id"],
+                {"crop_left_ratio": 0.1, "crop_right_ratio": 0.0, "crop_top_ratio": 0.2, "crop_bottom_ratio": 0.0},
+            )
+            self.assertAlmostEqual(page_detail["crop_left_ratio"], 0.1)
+            self.assertAlmostEqual(page_detail["crop_right_ratio"], 0.0)
+            self.assertAlmostEqual(page_detail["crop_top_ratio"], 0.2)
+            self.assertAlmostEqual(page_detail["crop_bottom_ratio"], 0.0)
+            self.assertEqual(int(page_detail["page_crop_override"]), 1)
+
+            image = services.load_page_image(services.repo.get_page_with_copybook(page["id"]), dpi=72)
+            self.assertEqual(image.size, (108, 80))
+
+            analysis = services.analyze_page(page["id"], dpi=72)
+            self.assertTrue(analysis["groups"])
+
+            preview_paths = services.render_page_previews(page["id"], {"grid_style": "tian", "cell_size_mm": 15, "margin_mm": 15, "dpi": 72})
+            self.assertTrue(preview_paths)
+            self.assertTrue(all(path.exists() for path in preview_paths))
+
+            reviewed = services.update_page_analysis(page["id"], analysis["groups"])
+            self.assertEqual(reviewed["status"], "reviewed")
+
+            post = services.export_page_to_generated_post(
+                page["id"],
+                {"grid_style": "mi", "cell_size_mm": 15, "margin_mm": 15, "dpi": 72},
+                "卷一",
+                "pdf",
+            )
+            self.assertEqual(post["name"], "卷一")
+            self.assertEqual(post["output_format"], "pdf")
+            self.assertTrue(Path(post["original_pdf_path"]).exists())
+
+    def test_page_rotation_is_applied_before_visual_crop(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "rotated-page.png"
+            _make_margin_image(source)
+            services = LinmoServices(AppPaths(root / "data"))
+
+            imported = services.import_copybooks([str(source)])
+            page = services.repo.list_pages(imported[0]["id"])[0]
+            detail = services.update_page_crop(
+                page["id"],
+                {
+                    "crop_left_ratio": 0.1,
+                    "crop_right_ratio": 0,
+                    "crop_top_ratio": 0.2,
+                    "crop_bottom_ratio": 0,
+                    "rotation_degrees": 90,
+                },
+            )
+
+            self.assertEqual(detail["rotation_degrees"], 90)
+            transformed = services.load_page_transformed_image(
+                services.repo.get_page_with_copybook(page["id"]),
+                dpi=72,
+            )
+            self.assertEqual(transformed.size, (100, 120))
+            transformed.close()
+
+            cropped = services.load_page_image(
+                services.repo.get_page_with_copybook(page["id"]),
+                dpi=72,
+            )
+            self.assertEqual(cropped.size, (90, 96))
+            cropped.close()
+            analysis = services.analyze_page(page["id"], dpi=72)
+            self.assertEqual(tuple(analysis["image_size"]), (90, 96))
+
+            transform_preview = services.create_page_transform_preview(page["id"])
+            cropped_preview = services.create_page_preview(page["id"])
+            with Image.open(transform_preview) as preview:
+                self.assertEqual(preview.size, (100, 120))
+            with Image.open(cropped_preview) as preview:
+                self.assertEqual(preview.size, (90, 96))
+
+    def test_editing_ocr_box_updates_source_and_selected_stream(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "editable-box.png"
+            _make_ruled_image(source)
+            services = LinmoServices(AppPaths(root / "data"))
+
+            imported = services.import_copybooks([str(source)])
+            page = services.repo.list_pages(imported[0]["id"])[0]
+            analysis = services.analyze_page(page["id"], dpi=72)
+            original = copy.deepcopy(analysis["groups"][0]["glyphs"][0])
+            selected = copy.deepcopy(original)
+            ordered = services.update_page_analysis(
+                page["id"],
+                [{
+                    "id": "selected-stream-1",
+                    "direction": "horizontal",
+                    "included": True,
+                    "glyphs": [selected],
+                }],
+            )
+            self.assertEqual(ordered["selection_mode"], "ordered_stream")
+
+            ocr_groups = copy.deepcopy(ordered["ocr_groups"])
+            edited = ocr_groups[0]["glyphs"][0]
+            edited["text"] = "改"
+            edited["bbox"] = [12, 14, 56, 70]
+            edited["polygon"] = [[12, 14], [56, 14], [56, 70], [12, 70]]
+            saved = services.update_page_ocr_groups(page["id"], ocr_groups)
+
+            self.assertEqual(saved["ocr_groups"][0]["glyphs"][0]["text"], "改")
+            self.assertEqual(saved["groups"][0]["glyphs"][0]["text"], "改")
+            self.assertEqual(saved["groups"][0]["glyphs"][0]["bbox"], [12, 14, 56, 70])
 
     def test_api_start_clears_previous_queue_items(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -144,6 +350,10 @@ class AppServicesTests(unittest.TestCase):
             source = root / "sample.png"
             _make_ruled_image(source)
             api = LinmoApi(AppPaths(root / "data"))
+            api.append_runtime_log("warning", "frontend.test", "test warning")
+            diagnostics = api.get_runtime_diagnostics()
+            self.assertTrue(diagnostics["log_path"].endswith("logs/linmo.log"))
+            self.assertTrue(any(entry["message"] == "test warning" for entry in diagnostics["entries"]))
 
             imported = api.import_copybooks([str(source)])
             page = api.list_pages(imported[0]["id"])[0]
@@ -156,6 +366,48 @@ class AppServicesTests(unittest.TestCase):
             self.assertEqual(first_items[0]["id"], second_items[0]["id"])
             self.assertEqual(len(queue_items), 1)
             self.assertEqual(queue_items[0]["page_id"], page["id"])
+
+    def test_api_page_detail_crop_analysis_and_export(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "sample.png"
+            _make_margin_image(source)
+            api = LinmoApi(AppPaths(root / "data"))
+
+            imported = api.import_copybooks([str(source)])
+            page = api.list_pages(imported[0]["id"])[0]
+            detail = api.get_page_detail(page["id"])
+            self.assertEqual(detail["copybook_title"], imported[0]["title"])
+
+            updated = api.update_page_crop(
+                page["id"],
+                {
+                    "crop_left_ratio": 0.1,
+                    "crop_right_ratio": 0.05,
+                    "crop_top_ratio": 0.15,
+                    "crop_bottom_ratio": 0.05,
+                    "rotation_degrees": 1.5,
+                },
+            )
+            self.assertAlmostEqual(updated["crop_left_ratio"], 0.1)
+            self.assertAlmostEqual(updated["crop_right_ratio"], 0.05)
+            self.assertAlmostEqual(updated["crop_top_ratio"], 0.15)
+            self.assertAlmostEqual(updated["crop_bottom_ratio"], 0.05)
+            self.assertAlmostEqual(updated["rotation_degrees"], 1.5)
+            self.assertTrue(api.get_page_transform_preview(page["id"]).startswith("data:image/"))
+            self.assertTrue(api.get_page_preview(page["id"]).startswith("data:image/"))
+
+            analysis = api.analyze_page(page["id"])
+            self.assertTrue(analysis["groups"])
+            saved = api.update_page_analysis(page["id"], analysis["groups"])
+            self.assertEqual(saved["status"], "reviewed")
+
+            previews = api.render_page_previews(page["id"], {"grid_style": "tian", "cell_size_mm": 15, "margin_mm": 15, "dpi": 72})
+            self.assertTrue(previews)
+
+            post = api.export_page_to_generated_post(page["id"], {"grid_style": "mi", "cell_size_mm": 15, "margin_mm": 15, "dpi": 72}, "卷一", "png")
+            self.assertEqual(post["output_format"], "png")
+            self.assertTrue(Path(post["original_pdf_path"]).exists())
 
     def test_api_import_pdf_and_preset_crud(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -175,10 +427,22 @@ class AppServicesTests(unittest.TestCase):
             _make_ruled_image(cover_source)
             updated_copybook = api.update_copybook_metadata(
                 imported[0]["id"],
-                {"title": "样帖", "author": "作者", "cover_source_path": str(cover_source)},
+                {
+                    "title": "样帖",
+                    "author": "作者",
+                    "cover_source_path": str(cover_source),
+                    "crop_left_ratio": 0.05,
+                    "crop_right_ratio": 0.1,
+                    "crop_top_ratio": 0.1,
+                    "crop_bottom_ratio": 0.15,
+                },
             )
             self.assertEqual(updated_copybook["title"], "样帖")
             self.assertEqual(updated_copybook["author"], "作者")
+            self.assertAlmostEqual(updated_copybook["crop_left_ratio"], 0.05)
+            self.assertAlmostEqual(updated_copybook["crop_right_ratio"], 0.1)
+            self.assertAlmostEqual(updated_copybook["crop_top_ratio"], 0.1)
+            self.assertAlmostEqual(updated_copybook["crop_bottom_ratio"], 0.15)
             self.assertTrue(updated_copybook["cover_path"])
             self.assertNotEqual(Path(updated_copybook["cover_path"]).resolve(), cover_source.resolve())
             self.assertTrue(api.get_copybook_cover(imported[0]["id"]).startswith("data:image/"))
@@ -217,6 +481,15 @@ def _make_ruled_image(path: Path) -> None:
         draw.line((20, y, 340, y), fill=(120, 120, 120), width=2)
     draw.text((42, 62), "linmo", fill=(0, 0, 0))
     draw.text((42, 122), "copy", fill=(0, 0, 0))
+    image.save(path)
+
+
+def _make_margin_image(path: Path) -> None:
+    image = Image.new("RGB", (120, 100), (255, 255, 255))
+    draw = ImageDraw.Draw(image)
+    draw.rectangle((0, 0, 119, 19), fill=(200, 0, 0))
+    draw.rectangle((0, 70, 119, 99), fill=(0, 0, 200))
+    draw.text((20, 40), "body", fill=(0, 0, 0))
     image.save(path)
 
 
