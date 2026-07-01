@@ -1263,6 +1263,270 @@ textarea {
   min-height: 96px;
 }
 
+.featurePage {
+  height: 100%;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: auto;
+  padding-right: 4px;
+}
+
+.sectionHeader > div:first-child {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.dictionaryToolbar {
+  display: grid;
+  grid-template-columns: minmax(150px, 0.7fr) minmax(180px, 1fr) minmax(160px, 0.8fr) auto;
+  gap: 12px;
+  align-items: end;
+  padding: 16px;
+  border: 1px solid #e0e0e0;
+  border-radius: 10px;
+  background: #ffffff;
+}
+
+.resultSummary {
+  min-height: 42px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.glyphResultGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: 12px;
+}
+
+.glyphResultCard {
+  min-width: 0;
+  padding: 10px;
+}
+
+.glyphResultCard.clickable {
+  cursor: pointer;
+}
+
+.glyphResultCard.selected {
+  outline: 3px solid #0f6cbd;
+}
+
+.glyphResultImage {
+  width: 100%;
+  aspect-ratio: 1;
+  display: grid;
+  place-items: center;
+  margin-bottom: 6px;
+  overflow: hidden;
+  border-radius: 6px;
+  background-color: #f4f4f4;
+  background-image:
+    linear-gradient(45deg, #e6e6e6 25%, transparent 25%),
+    linear-gradient(-45deg, #e6e6e6 25%, transparent 25%),
+    linear-gradient(45deg, transparent 75%, #e6e6e6 75%),
+    linear-gradient(-45deg, transparent 75%, #e6e6e6 75%);
+  background-position: 0 0, 0 8px, 8px -8px, -8px 0;
+  background-size: 16px 16px;
+}
+
+.glyphResultImage img {
+  width: 88%;
+  height: 88%;
+  object-fit: contain;
+}
+
+.collectionPage {
+  overflow: hidden;
+}
+
+.collectionWorkspace {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: 230px minmax(0, 1fr);
+  gap: 16px;
+}
+
+.collectionSidebar {
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 12px;
+  border: 1px solid #e0e0e0;
+  border-radius: 10px;
+  background: #ffffff;
+}
+
+.collectionCreate {
+  display: grid;
+  gap: 8px;
+}
+
+.collectionList {
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  overflow: auto;
+}
+
+.collectionListItem {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 10px;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  color: inherit;
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+}
+
+.collectionListItem:hover {
+  background: #f5f5f5;
+}
+
+.collectionListItem.selected {
+  border-color: #0f6cbd;
+  background: #ebf3fc;
+}
+
+.collectionListItem small {
+  overflow: hidden;
+  color: #707070;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.collectionEditor {
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  overflow: auto;
+}
+
+.collectionControls {
+  display: grid;
+  grid-template-columns: minmax(160px, 1fr) 120px 110px 110px auto auto;
+  gap: 10px;
+  align-items: end;
+}
+
+.collectionContent {
+  flex: 1;
+  min-height: 360px;
+  display: grid;
+  grid-template-columns: minmax(260px, 0.65fr) minmax(400px, 1.35fr);
+  gap: 16px;
+}
+
+.collectionContent > div {
+  min-height: 0;
+}
+
+.collectionSlots {
+  display: flex;
+  flex-wrap: wrap;
+  align-content: flex-start;
+  gap: 8px;
+  max-height: 100%;
+  margin-top: 8px;
+  overflow: auto;
+}
+
+.collectionSlot {
+  width: 64px;
+  height: 64px;
+  display: grid;
+  place-items: center;
+  padding: 4px;
+  border: 1px solid #d1d1d1;
+  border-radius: 6px;
+  color: #616161;
+  background: #ffffff;
+}
+
+.collectionSlot.selectable {
+  cursor: pointer;
+}
+
+.collectionSlot.selectable:hover {
+  border-color: #0f6cbd;
+}
+
+.collectionSlot.missing {
+  border-color: #d13438;
+  border-style: dashed;
+}
+
+.collectionSlot img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+
+.collectionLineBreak {
+  flex-basis: 100%;
+  height: 0;
+}
+
+.collectionPreview {
+  min-height: 360px;
+  display: grid;
+  place-items: center;
+  overflow: auto;
+  border: 1px solid #d1d1d1;
+  border-radius: 8px;
+}
+
+.collectionPreview.transparent {
+  background-color: #f4f4f4;
+  background-image:
+    linear-gradient(45deg, #e2e2e2 25%, transparent 25%),
+    linear-gradient(-45deg, #e2e2e2 25%, transparent 25%),
+    linear-gradient(45deg, transparent 75%, #e2e2e2 75%),
+    linear-gradient(-45deg, transparent 75%, #e2e2e2 75%);
+  background-position: 0 0, 0 12px, 12px -12px, -12px 0;
+  background-size: 24px 24px;
+}
+
+.collectionPreview.white {
+  background: #ffffff;
+}
+
+.collectionPreview img {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+}
+
+.candidateDialog {
+  width: min(900px, calc(100vw - 40px));
+  max-width: none;
+  max-height: calc(100vh - 60px);
+}
+
+.candidateDialog .glyphResultGrid {
+  max-height: 65vh;
+  overflow: auto;
+}
+
+.emptyState {
+  display: grid;
+  place-items: center;
+  min-height: 280px;
+  border: 1px dashed #c7c7c7;
+  border-radius: 10px;
+}
+
 @media (max-width: 980px) {
   .workspace {
     padding: 18px;
@@ -1310,5 +1574,19 @@ textarea {
   .previewTopbar {
     align-items: flex-start;
     flex-wrap: wrap;
+  }
+
+  .dictionaryToolbar,
+  .collectionControls {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .collectionWorkspace,
+  .collectionContent {
+    grid-template-columns: 1fr;
+  }
+
+  .collectionSidebar {
+    max-height: 220px;
   }
 }

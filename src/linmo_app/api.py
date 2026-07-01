@@ -128,6 +128,48 @@ class LinmoApi:
     ) -> dict[str, Any]:
         return self.services.update_page_ocr_groups(int(page_id), groups)
 
+    def search_glyphs(
+        self,
+        text: str,
+        copybook_id: int | None = None,
+        author: str = "",
+        limit: int = 60,
+        offset: int = 0,
+    ) -> dict[str, Any]:
+        return self.services.search_glyphs(text, copybook_id, author, int(limit), int(offset))
+
+    def list_glyph_filters(self, text: str = "") -> dict[str, Any]:
+        return self.services.list_glyph_filters(text)
+
+    def get_glyph_image(self, occurrence_id: int) -> str:
+        return file_to_data_url(self.services.glyph_image(int(occurrence_id)))
+
+    def list_collections(self) -> list[dict[str, Any]]:
+        return self.services.list_collections()
+
+    def create_collection(self, name: str) -> dict[str, Any]:
+        return self.services.create_collection(name)
+
+    def get_collection(self, collection_id: int) -> dict[str, Any]:
+        return self.services.get_collection(int(collection_id))
+
+    def update_collection(self, collection_id: int, data: dict[str, Any]) -> dict[str, Any]:
+        return self.services.update_collection(int(collection_id), data)
+
+    def rename_collection(self, collection_id: int, name: str) -> dict[str, Any]:
+        return self.services.update_collection(int(collection_id), {"name": name})
+
+    def delete_collection(self, collection_id: int) -> dict[str, bool]:
+        self.services.delete_collection(int(collection_id))
+        return {"ok": True}
+
+    def render_collection_preview(self, collection_id: int) -> str:
+        return file_to_data_url(self.services.render_collection_preview(int(collection_id)))
+
+    def export_collection_png(self, collection_id: int) -> dict[str, str]:
+        path = self.services.export_collection_png(int(collection_id))
+        return {"output_path": str(path)}
+
     def export_page_to_generated_post(
         self,
         page_id: int,

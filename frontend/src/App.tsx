@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import type { MouseEvent as ReactMouseEvent, PointerEvent as ReactPointerEvent, ReactElement, WheelEvent as ReactWheelEvent } from "react";
+import type { Dispatch, MouseEvent as ReactMouseEvent, PointerEvent as ReactPointerEvent, ReactElement, SetStateAction, WheelEvent as ReactWheelEvent } from "react";
 import {
   Badge,
   Button,
@@ -19,6 +19,7 @@ import {
   Select,
   Spinner,
   Text,
+  Textarea,
   Title1,
   Title2,
   Title3,
@@ -35,21 +36,26 @@ import {
   Dismiss24Regular,
   DocumentFolder24Regular,
   DocumentPdf24Regular,
+  Delete24Regular,
   FolderSync24Regular,
   Home24Regular,
   Image24Regular,
   LineHorizontal1Regular,
   Maximize16Regular,
   Save24Regular,
+  Search24Regular,
   Settings24Regular,
+  TextFont24Regular,
 } from "@fluentui/react-icons";
 import packageJson from "../package.json";
 import type {
   Api,
+  Collection,
   Copybook,
   GeneratedPost,
   GeneratedPostFile,
   Glyph,
+  GlyphOccurrence,
   GlyphGroup,
   Page,
   PageAnalysis,
@@ -59,7 +65,7 @@ import type {
   RuntimeLogEntry,
 } from "./types";
 
-type View = "home" | "library" | "make" | "practice" | "presets" | "settings";
+type View = "home" | "library" | "dictionary" | "collection" | "make" | "practice" | "presets" | "settings";
 type CopybookMetadataForm = {
   title: string;
   author: string;
@@ -199,6 +205,52 @@ const fallbackApi: Api = {
       image_size: [1, 1],
       groups,
     };
+  },
+  async search_glyphs() {
+    return { items: [], total: 0 };
+  },
+  async list_glyph_filters() {
+    return { copybooks: [], authors: [] };
+  },
+  async get_glyph_image() {
+    return "";
+  },
+  async list_collections() {
+    return [];
+  },
+  async create_collection(name) {
+    const now = Date.now();
+    return { id: now, name, input_text: "", direction: "horizontal", line_capacity: 8, background: "transparent", created_at: now, updated_at: now, items: [] };
+  },
+  async get_collection(collectionId) {
+    const now = Date.now();
+    return { id: collectionId, name: "集字方案", input_text: "", direction: "horizontal", line_capacity: 8, background: "transparent", created_at: now, updated_at: now, items: [] };
+  },
+  async update_collection(collectionId, data) {
+    const now = Date.now();
+    return {
+      id: collectionId,
+      name: data.name || "集字方案",
+      input_text: data.input_text || "",
+      direction: data.direction || "horizontal",
+      line_capacity: data.line_capacity || 8,
+      background: data.background || "transparent",
+      created_at: now,
+      updated_at: now,
+      items: [],
+    };
+  },
+  async rename_collection(collectionId, name) {
+    return this.update_collection(collectionId, { name });
+  },
+  async delete_collection() {
+    return { ok: true };
+  },
+  async render_collection_preview() {
+    return "";
+  },
+  async export_collection_png() {
+    return { output_path: "" };
   },
   async export_page_to_generated_post(page_id, _params, name, outputFormat) {
     return {
@@ -490,6 +542,8 @@ export function App() {
           </div>
           <NavButton icon={<Home24Regular />} active={view === "home"} onClick={() => setView("home")}>首页</NavButton>
           <NavButton icon={<BookOpen24Regular />} active={view === "library"} onClick={() => setView("library")}>藏帖</NavButton>
+          <NavButton icon={<Search24Regular />} active={view === "dictionary"} onClick={() => setView("dictionary")}>字典</NavButton>
+          <NavButton icon={<TextFont24Regular />} active={view === "collection"} onClick={() => setView("collection")}>集字</NavButton>
           <NavButton icon={<DocumentPdf24Regular />} active={view === "make"} onClick={() => setView("make")}>制帖</NavButton>
           <NavButton icon={<DocumentFolder24Regular />} active={view === "practice"} onClick={() => setView("practice")}>练帖</NavButton>
           <NavButton icon={<Color24Regular />} active={view === "presets"} onClick={() => setView("presets")}>预设</NavButton>
@@ -517,6 +571,8 @@ export function App() {
               openPractice={() => setView("practice")}
             />
           )}
+          {view === "dictionary" && <Dictionary setMessage={setMessage} />}
+          {view === "collection" && <CollectionWorkspace setMessage={setMessage} />}
           {view === "practice" && <PracticeShelf setMessage={setMessage} />}
           {view === "presets" && <Presets setMessage={setMessage} />}
           {view === "settings" && <Settings setMessage={setMessage} />}
@@ -2436,6 +2492,454 @@ function pointInBBox(x: number, y: number, bbox: [number, number, number, number
 
 function distanceToPoint(point: { x: number; y: number }, x: number, y: number) {
   return Math.hypot(point.x - x, point.y - y);
+}
+
+function Dictionary({ setMessage }: { setMessage: (value: string) => void }) {
+  const [query, setQuery] = useState("");
+  const [copybookId, setCopybookId] = useState("");
+  const [author, setAuthor] = useState("");
+  const [results, setResults] = useState<GlyphOccurrence[]>([]);
+  const [total, setTotal] = useState(0);
+  const [images, setImages] = useState<Record<number, string>>({});
+  const [filters, setFilters] = useState<{
+    copybooks: Array<{ id: number; title: string; author: string; glyph_count: number }>;
+    authors: Array<{ author: string; glyph_count: number }>;
+  }>({ copybooks: [], authors: [] });
+  const [loading, setLoading] = useState(false);
+
+  async function runSearch(append = false) {
+    const character = Array.from(query.trim());
+    if (character.length !== 1 || !isHanCharacter(character[0])) {
+      setMessage("请输入一个汉字");
+      return;
+    }
+    setLoading(true);
+    try {
+      const offset = append ? results.length : 0;
+      const [response, availableFilters] = await Promise.all([
+        api().search_glyphs(
+          character[0],
+          copybookId ? Number(copybookId) : null,
+          author,
+          60,
+          offset,
+        ),
+        append ? Promise.resolve(filters) : api().list_glyph_filters(character[0]),
+      ]);
+      setResults((current) => append ? [...current, ...response.items] : response.items);
+      setTotal(response.total);
+      if (!append) setFilters(availableFilters);
+      void loadGlyphImages(response.items, setImages);
+    } catch (error) {
+      setMessage(String(error));
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    if (results.length) void runSearch(false);
+  }, [copybookId, author]);
+
+  return (
+    <section className="featurePage">
+      <div className="sectionHeader">
+        <div>
+          <Title1>字典</Title1>
+          <Text>检索已经识别的书帖单字，人工校对结果会优先显示。</Text>
+        </div>
+      </div>
+      <div className="dictionaryToolbar">
+        <Field label="单字">
+          <Input
+            value={query}
+            placeholder="输入一个汉字"
+            onChange={(_, data) => setQuery(Array.from(data.value).slice(0, 1).join(""))}
+            onKeyDown={(event) => {
+              if (event.key === "Enter") void runSearch(false);
+            }}
+          />
+        </Field>
+        <Field label="书帖">
+          <Select value={copybookId} onChange={(_, data) => setCopybookId(data.value)}>
+            <option value="">全部书帖</option>
+            {filters.copybooks.map((copybook) => (
+              <option key={copybook.id} value={String(copybook.id)}>
+                {copybook.title}（{copybook.glyph_count}）
+              </option>
+            ))}
+          </Select>
+        </Field>
+        <Field label="作者">
+          <Select value={author} onChange={(_, data) => setAuthor(data.value)}>
+            <option value="">全部作者</option>
+            {filters.authors.map((item) => (
+              <option key={item.author} value={item.author}>{item.author}（{item.glyph_count}）</option>
+            ))}
+          </Select>
+        </Field>
+        <Button appearance="primary" icon={<Search24Regular />} onClick={() => void runSearch(false)} disabled={loading}>
+          搜索
+        </Button>
+      </div>
+      <div className="resultSummary">
+        <Text>{total ? `共找到 ${total} 个字样` : "输入单字开始搜索"}</Text>
+        {loading && <Spinner size="tiny" />}
+      </div>
+      <div className="glyphResultGrid">
+        {results.map((glyph) => (
+          <GlyphResultCard key={glyph.id} glyph={glyph} image={images[glyph.id]} />
+        ))}
+      </div>
+      {results.length < total && (
+        <Button onClick={() => void runSearch(true)} disabled={loading}>加载更多</Button>
+      )}
+    </section>
+  );
+}
+
+function GlyphResultCard({
+  glyph,
+  image,
+  onClick,
+  selected = false,
+}: {
+  glyph: GlyphOccurrence;
+  image?: string;
+  onClick?: () => void;
+  selected?: boolean;
+}) {
+  return (
+    <Card
+      className={`glyphResultCard ${selected ? "selected" : ""} ${onClick ? "clickable" : ""}`}
+      onClick={onClick}
+    >
+      <div className="glyphResultImage">
+        {image ? <img src={image} alt={glyph.text} /> : <Spinner size="tiny" />}
+      </div>
+      <Text weight="semibold">{glyph.copybook_title}</Text>
+      <Text size={200}>{glyph.copybook_author || "佚名"} · 第 {glyph.page_no} 页</Text>
+      <Text size={200}>置信度 {Math.round(glyph.confidence * 100)}%</Text>
+    </Card>
+  );
+}
+
+function CollectionWorkspace({ setMessage }: { setMessage: (value: string) => void }) {
+  const [collections, setCollections] = useState<Collection[]>([]);
+  const [selectedId, setSelectedId] = useState<number | null>(null);
+  const [draft, setDraft] = useState<Collection | null>(null);
+  const [newName, setNewName] = useState("");
+  const [preview, setPreview] = useState("");
+  const [slotImages, setSlotImages] = useState<Record<number, string>>({});
+  const [candidatePosition, setCandidatePosition] = useState<number | null>(null);
+  const [candidates, setCandidates] = useState<GlyphOccurrence[]>([]);
+  const [candidateImages, setCandidateImages] = useState<Record<number, string>>({});
+  const [saving, setSaving] = useState(false);
+  const savedSignature = useRef("");
+
+  async function loadCollections(preferredId?: number) {
+    const loaded = await api().list_collections();
+    setCollections(loaded);
+    const target = preferredId ?? selectedId ?? loaded[0]?.id;
+    if (target) await openCollection(target);
+  }
+
+  async function openCollection(collectionId: number) {
+    const loaded = await api().get_collection(collectionId);
+    setSelectedId(collectionId);
+    setDraft(loaded);
+    savedSignature.current = collectionSignature(loaded);
+    setSlotImages({});
+    void loadCollectionImages(loaded, setSlotImages);
+    try {
+      setPreview(await api().render_collection_preview(collectionId));
+    } catch (error) {
+      setMessage(String(error));
+    }
+  }
+
+  async function createCollection() {
+    if (!newName.trim()) {
+      setMessage("集字方案名称不能为空");
+      return;
+    }
+    try {
+      const created = await api().create_collection(newName.trim());
+      setNewName("");
+      await loadCollections(created.id);
+    } catch (error) {
+      setMessage(String(error));
+    }
+  }
+
+  useEffect(() => {
+    loadCollections().catch((error) => setMessage(String(error)));
+  }, []);
+
+  useEffect(() => {
+    if (!draft || collectionSignature(draft) === savedSignature.current) return;
+    const timeout = window.setTimeout(async () => {
+      setSaving(true);
+      try {
+        const updated = await api().update_collection(draft.id, {
+          name: draft.name,
+          input_text: draft.input_text,
+          direction: draft.direction,
+          line_capacity: draft.line_capacity,
+          background: draft.background,
+        });
+        savedSignature.current = collectionSignature(updated);
+        setDraft(updated);
+        setCollections((current) => current.map((item) => item.id === updated.id ? updated : item));
+        setSlotImages({});
+        void loadCollectionImages(updated, setSlotImages);
+        setPreview(await api().render_collection_preview(updated.id));
+      } catch (error) {
+        setMessage(String(error));
+      } finally {
+        setSaving(false);
+      }
+    }, 600);
+    return () => window.clearTimeout(timeout);
+  }, [draft?.name, draft?.input_text, draft?.direction, draft?.line_capacity, draft?.background]);
+
+  async function removeCollection() {
+    if (!draft || !window.confirm(`删除集字方案“${draft.name}”？`)) return;
+    try {
+      await api().delete_collection(draft.id);
+      setDraft(null);
+      setSelectedId(null);
+      setPreview("");
+      await loadCollections();
+    } catch (error) {
+      setMessage(String(error));
+    }
+  }
+
+  async function openCandidates(position: number, character: string) {
+    try {
+      const response = await api().search_glyphs(character, null, "", 200, 0);
+      setCandidatePosition(position);
+      setCandidates(response.items);
+      setCandidateImages({});
+      void loadGlyphImages(response.items, setCandidateImages);
+    } catch (error) {
+      setMessage(String(error));
+    }
+  }
+
+  async function chooseCandidate(occurrenceId: number) {
+    if (!draft || candidatePosition === null) return;
+    setSaving(true);
+    try {
+      const updated = await api().update_collection(draft.id, {
+        selections: [{ position: candidatePosition, occurrence_id: occurrenceId }],
+      });
+      savedSignature.current = collectionSignature(updated);
+      setDraft(updated);
+      setCandidatePosition(null);
+      setSlotImages({});
+      void loadCollectionImages(updated, setSlotImages);
+      setPreview(await api().render_collection_preview(updated.id));
+    } catch (error) {
+      setMessage(String(error));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function exportPng() {
+    if (!draft) return;
+    try {
+      const result = await api().export_collection_png(draft.id);
+      setMessage(`已导出：${result.output_path}`);
+    } catch (error) {
+      setMessage(String(error));
+    }
+  }
+
+  return (
+    <section className="featurePage collectionPage">
+      <div className="sectionHeader">
+        <div>
+          <Title1>集字</Title1>
+          <Text>输入文字后自动匹配字样，点击单字可更换来源。</Text>
+        </div>
+        {saving && <Spinner size="tiny" label="正在保存" />}
+      </div>
+      <div className="collectionWorkspace">
+        <aside className="collectionSidebar">
+          <div className="collectionCreate">
+            <Input value={newName} placeholder="新方案名称" onChange={(_, data) => setNewName(data.value)} />
+            <Button appearance="primary" icon={<Add24Regular />} onClick={() => void createCollection()}>新建</Button>
+          </div>
+          <div className="collectionList">
+            {collections.map((collection) => (
+              <button
+                key={collection.id}
+                type="button"
+                className={`collectionListItem ${selectedId === collection.id ? "selected" : ""}`}
+                onClick={() => void openCollection(collection.id)}
+              >
+                <span>{collection.name}</span>
+                <small>{collection.input_text.slice(0, 18) || "尚未输入文字"}</small>
+              </button>
+            ))}
+          </div>
+        </aside>
+        {draft ? (
+          <div className="collectionEditor">
+            <div className="collectionControls">
+              <Field label="方案名称">
+                <Input value={draft.name} onChange={(_, data) => setDraft({ ...draft, name: data.value })} />
+              </Field>
+              <Field label="排版方向">
+                <Select value={draft.direction} onChange={(_, data) => setDraft({ ...draft, direction: data.value as Collection["direction"] })}>
+                  <option value="horizontal">横排</option>
+                  <option value="vertical">竖排</option>
+                </Select>
+              </Field>
+              <Field label={draft.direction === "horizontal" ? "每行字数" : "每列字数"}>
+                <Input
+                  type="number"
+                  min={1}
+                  max={50}
+                  value={String(draft.line_capacity)}
+                  onChange={(_, data) => setDraft({ ...draft, line_capacity: Math.max(1, Math.min(50, Number(data.value) || 1)) })}
+                />
+              </Field>
+              <Field label="图片背景">
+                <Select value={draft.background} onChange={(_, data) => setDraft({ ...draft, background: data.value as Collection["background"] })}>
+                  <option value="transparent">透明</option>
+                  <option value="white">白色</option>
+                </Select>
+              </Field>
+              <Button icon={<Delete24Regular />} onClick={() => void removeCollection()}>删除</Button>
+              <Button appearance="primary" icon={<Image24Regular />} onClick={() => void exportPng()}>导出 PNG</Button>
+            </div>
+            <Field label="集字内容">
+              <Textarea
+                resize="vertical"
+                rows={4}
+                value={draft.input_text}
+                placeholder="输入要集字的文字；换行会保留在排版中"
+                onChange={(_, data) => setDraft({ ...draft, input_text: data.value })}
+              />
+            </Field>
+            <div className="collectionContent">
+              <div>
+                <Text weight="semibold">逐字选择</Text>
+                <div className="collectionSlots">
+                  {Array.from(draft.input_text).map((character, position) => {
+                    if (character === "\n") return <div className="collectionLineBreak" key={`break-${position}`} />;
+                    const item = draft.items?.find((candidate) => candidate.position === position);
+                    const selectable = isHanCharacter(character);
+                    return (
+                      <button
+                        type="button"
+                        key={`${position}-${character}`}
+                        className={`collectionSlot ${selectable ? "selectable" : ""} ${selectable && !item?.occurrence_id ? "missing" : ""}`}
+                        disabled={!selectable}
+                        onClick={() => void openCandidates(position, character)}
+                      >
+                        {item?.occurrence_id && slotImages[item.occurrence_id]
+                          ? <img src={slotImages[item.occurrence_id]} alt={character} />
+                          : <span>{character === " " ? "空格" : character}</span>}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+              <div className={`collectionPreview ${draft.background}`}>
+                {preview ? <img src={preview} alt={`${draft.name}预览`} /> : <Spinner label="正在生成预览" />}
+              </div>
+            </div>
+          </div>
+        ) : (
+          <div className="emptyState"><Text>新建或选择一个集字方案</Text></div>
+        )}
+      </div>
+      <Dialog open={candidatePosition !== null} onOpenChange={(_, data) => !data.open && setCandidatePosition(null)}>
+        <DialogSurface className="candidateDialog">
+          <DialogBody>
+            <DialogTitle>选择字样</DialogTitle>
+            <DialogContent>
+              <div className="glyphResultGrid">
+                {candidates.map((glyph) => (
+                  <GlyphResultCard
+                    key={glyph.id}
+                    glyph={glyph}
+                    image={candidateImages[glyph.id]}
+                    selected={draft?.items?.some((item) => item.position === candidatePosition && item.occurrence_id === glyph.id)}
+                    onClick={() => void chooseCandidate(glyph.id)}
+                  />
+                ))}
+              </div>
+            </DialogContent>
+            <DialogActions>
+              <Button onClick={() => setCandidatePosition(null)}>关闭</Button>
+            </DialogActions>
+          </DialogBody>
+        </DialogSurface>
+      </Dialog>
+    </section>
+  );
+}
+
+async function loadGlyphImages(
+  glyphs: GlyphOccurrence[],
+  setter: Dispatch<SetStateAction<Record<number, string>>>,
+) {
+  const queue = [...glyphs];
+  const workers = Array.from({ length: Math.min(6, queue.length) }, async () => {
+    while (queue.length) {
+      const glyph = queue.shift();
+      if (!glyph) return;
+      try {
+        const image = await api().get_glyph_image(glyph.id);
+        setter((current) => ({ ...current, [glyph.id]: image }));
+      } catch {
+        // A stale candidate can disappear after its source page is reprocessed.
+      }
+    }
+  });
+  await Promise.all(workers);
+}
+
+async function loadCollectionImages(
+  collection: Collection,
+  setter: Dispatch<SetStateAction<Record<number, string>>>,
+) {
+  const ids = [...new Set((collection.items || []).map((item) => item.occurrence_id).filter((id): id is number => id !== null))];
+  await Promise.all(ids.map(async (id) => {
+    try {
+      const image = await api().get_glyph_image(id);
+      setter((current) => ({ ...current, [id]: image }));
+    } catch {
+      // The next save resolves stale selections.
+    }
+  }));
+}
+
+function collectionSignature(collection: Collection) {
+  return JSON.stringify({
+    name: collection.name,
+    input_text: collection.input_text,
+    direction: collection.direction,
+    line_capacity: collection.line_capacity,
+    background: collection.background,
+  });
+}
+
+function isHanCharacter(value: string) {
+  if (Array.from(value).length !== 1) return false;
+  const codepoint = value.codePointAt(0) || 0;
+  return (
+    (codepoint >= 0x3400 && codepoint <= 0x4dbf)
+    || (codepoint >= 0x4e00 && codepoint <= 0x9fff)
+    || (codepoint >= 0xf900 && codepoint <= 0xfaff)
+    || (codepoint >= 0x20000 && codepoint <= 0x323af)
+  );
 }
 
 function PracticeShelf({ setMessage }: { setMessage: (value: string) => void }) {
